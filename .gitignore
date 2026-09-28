@@ -1,0 +1,18 @@
+# Build output
+/bin/
+
+# Local data and secrets
+*.db
+*.db-shm
+*.db-wal
+.env
+config.yaml
+
+# Test / coverage
+*.out
+coverage.*
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
