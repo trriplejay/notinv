@@ -19,6 +19,23 @@ internal/web/        dashboard + JSON API server
 web/static/          dashboard frontend assets (embedded into the binary)
 ```
 
+## Configuration
+
+Copy `.env.example` to `.env` for local development, or pass `-env-file path/to/file`
+to select another dotenv file. Existing environment variables take precedence over
+file values. An absent default `.env` is allowed (for example, in containers), but
+an explicitly selected missing file is a startup error, including `-env-file .env`.
+`-version` prints the build version without loading dotenv or validating config.
+Leaving both Discord variables empty runs notifications in dry-run mode and logs
+a startup warning.
+
+### Script variables
+
+Scripts read their own variables directly with `os.Getenv`, using a script-name
+prefix: `SCRIPTNAME_VAR`. For example, a script named `widget` reads its stock URL
+with `os.Getenv("WIDGET_STOCK_URL")`. These per-script settings are separate from
+the application's central configuration.
+
 ## Development
 
 Requires Go 1.26+. Linting requires [golangci-lint](https://golangci-lint.run/welcome/install/) v2.
