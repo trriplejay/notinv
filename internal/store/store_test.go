@@ -306,7 +306,7 @@ func TestMigrationFailureRollsBack(t *testing.T) {
 }
 
 func TestDatabaseDSN(t *testing.T) {
-	const token = "secret +&/?="
+	const token = "secret +&/?=" //nolint:gosec // G101 false positive: fake auth token test fixture, not a real credential
 	local := "file:./test.db?mode=rwc"
 	if dsn, scheme, err := databaseDSN(local, token); err != nil || dsn != local || scheme != "file" {
 		t.Fatalf("local DSN = %q, %q, %v", dsn, scheme, err)
