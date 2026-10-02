@@ -16,3 +16,6 @@ coverage.*
 .idea/
 .vscode/
 .DS_Store
+
+# Tool state (gh CLI, etc.)
+.local/
