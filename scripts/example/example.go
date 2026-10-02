@@ -61,13 +61,13 @@ func (*Script) check(ctx context.Context, rc *runner.Context) error {
 	if url == "" {
 		return errors.New("EXAMPLE_URL must be set")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // G704 false positive: this is a monitoring template whose sole purpose is fetching an operator-configured EXAMPLE_URL, not an SSRF vector
 	if err != nil {
 		return fmt.Errorf("build example request: %w", err)
 	}
 	// Always use the supplied client: it owns timeouts and transport settings,
 	// and tests can replace its transport without making any network calls.
-	resp, err := rc.HTTP.Do(req)
+	resp, err := rc.HTTP.Do(req) //nolint:gosec // G704 false positive: issuing the request to the operator-configured EXAMPLE_URL is the required health-check behavior, not an SSRF vulnerability
 	if err != nil {
 		return fmt.Errorf("perform example request: %w", err)
 	}
