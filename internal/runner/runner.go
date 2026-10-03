@@ -9,6 +9,8 @@ import (
 
 	"github.com/robfig/cron/v3"
 
+	"github.com/trriplejay/notinv/internal/config"
+	"github.com/trriplejay/notinv/internal/notify"
 	storepkg "github.com/trriplejay/notinv/internal/store"
 )
 
@@ -32,20 +34,18 @@ type Context struct {
 	// HTTP is the client to use for requests, including its configured timeouts.
 	HTTP *http.Client
 
-	// Notify is dry-run (logs instead of sending) pending the Discord notifier.
+	// Notify sends a Discord DM, or logs the message when configured for dry-run.
 	// Callers may replace it to inject a different notification implementation.
 	Notify func(ctx context.Context, msg string) error
 }
 
-// NewContext wires a logger and HTTP client to a dry-run notification function.
-// The caller must supply a non-nil logger already tagged with script=<name> and
-// a non-nil HTTP client with appropriate timeouts for the script.
-func NewContext(log *slog.Logger, httpClient *http.Client) *Context {
+// NewContext wires shared services to a config-driven Discord notifier.
+// The caller must supply a non-nil config, a non-nil logger already tagged with
+// script=<name>, and a non-nil HTTP client with appropriate timeouts.
+func NewContext(log *slog.Logger, httpClient *http.Client, cfg *config.Config) *Context {
 	rc := &Context{Log: log, HTTP: httpClient}
-	rc.Notify = func(ctx context.Context, msg string) error {
-		rc.Log.InfoContext(ctx, "notify (dry-run)", slog.String("message", msg))
-		return nil
-	}
+	notifier := notify.New(*cfg, log, notify.Options{HTTPClient: httpClient})
+	rc.Notify = notifier.Send
 	return rc
 }
 

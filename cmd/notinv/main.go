@@ -68,7 +68,7 @@ func run() error {
 
 	logger := slog.Default()
 	httpClient := &http.Client{Timeout: 30 * time.Second}
-	rc := runner.NewContext(logger, httpClient)
+	rc := runner.NewContext(logger, httpClient, cfg)
 
 	scripts := []runner.Script{example.New()}
 	var wg sync.WaitGroup
