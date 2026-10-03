@@ -238,7 +238,7 @@ func TestRunCancellation(t *testing.T) {
 		stop := startTestRunner(t, script, quietContext(), runs)
 		defer stop()
 		synctest.Wait() // Ensure Run has reached the cancellable timer wait.
-		stop()         // Requires a clean return within 200ms, not an hour.
+		stop()          // Requires a clean return within 200ms, not an hour.
 		if len(runs.snapshot()) != 0 {
 			t.Error("cancelled schedule persisted a run")
 		}
