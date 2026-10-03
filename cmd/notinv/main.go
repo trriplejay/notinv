@@ -15,6 +15,8 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/trriplejay/notinv/internal/config"
+	"github.com/trriplejay/notinv/internal/rc"
+	"github.com/trriplejay/notinv/internal/store"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -55,11 +57,21 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	db, err := store.Open(ctx, cfg.DatabaseURL, cfg.DatabaseAuthToken)
+	if err != nil {
+		return fmt.Errorf("open recording store: %w", err)
+	}
+	writer := rc.NewWriter(db, version, slog.Default(), rc.Options{})
+
 	slog.Info("notinv starting", "version", version)
 
 	<-ctx.Done()
 
 	slog.Info("notinv shutting down")
+	writer.Close()
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("close recording store: %w", err)
+	}
 	return nil
 }
 
