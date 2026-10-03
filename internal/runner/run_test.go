@@ -324,9 +324,10 @@ func TestRunLogsAndRecordsOutcomes(t *testing.T) {
 				recorded := runs.waitForRuns(t, 1)
 				stop() // Join before reading the logger's bytes.Buffer.
 				wantOK, wantError, errorAttr := true, "", `error=""`
-				if outcome == "error" {
+				switch outcome {
+				case "error":
 					wantOK, wantError, errorAttr = false, "check failed", `error="check failed"`
-				} else if outcome == "panic" {
+				case "panic":
 					wantOK, wantError, errorAttr = false, "panic: check crashed", `error="panic: check crashed"`
 				}
 				run := recorded[0]
