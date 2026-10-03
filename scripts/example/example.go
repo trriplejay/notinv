@@ -25,6 +25,9 @@ type Script struct {
 // compile error instead of a surprise when the script is registered later.
 var _ runner.Script = (*Script)(nil)
 
+// New returns a ready-to-use *Script (its documented zero value).
+func New() *Script { return &Script{} }
+
 // Name returns the stable identifier used for this script's logs and results.
 func (*Script) Name() string { return "example" }
 
