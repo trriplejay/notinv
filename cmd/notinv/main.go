@@ -8,15 +8,20 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 
 	"github.com/trriplejay/notinv/internal/config"
 	"github.com/trriplejay/notinv/internal/rc"
+	"github.com/trriplejay/notinv/internal/runner"
 	"github.com/trriplejay/notinv/internal/store"
+	"github.com/trriplejay/notinv/scripts/example"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -63,11 +68,28 @@ func run() error {
 	}
 	writer := rc.NewWriter(db, version, slog.Default(), rc.Options{})
 
+	logger := slog.Default()
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	runCtx := runner.NewContext(logger, httpClient, cfg)
+
+	scripts := []runner.Script{example.New()}
+	var wg sync.WaitGroup
+	for _, script := range scripts {
+		wg.Add(1)
+		go func(s runner.Script) {
+			defer wg.Done()
+			if err := runner.Run(ctx, s, runCtx, db); err != nil {
+				slog.Error("runner exited", "script", s.Name(), "err", err)
+			}
+		}(script)
+	}
+
 	slog.Info("notinv starting", "version", version)
 
 	<-ctx.Done()
 
 	slog.Info("notinv shutting down")
+	wg.Wait()
 	writer.Close()
 	if err := db.Close(); err != nil {
 		return fmt.Errorf("close recording store: %w", err)
