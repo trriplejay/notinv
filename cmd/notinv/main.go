@@ -11,14 +11,18 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
 
 	"github.com/trriplejay/notinv/internal/config"
+	"github.com/trriplejay/notinv/internal/rc"
+	"github.com/trriplejay/notinv/internal/runner"
 	"github.com/trriplejay/notinv/internal/store"
 	"github.com/trriplejay/notinv/internal/web"
+	"github.com/trriplejay/notinv/scripts/example"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -63,6 +67,23 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
+	writer := rc.NewWriter(st, version, slog.Default(), rc.Options{})
+
+	logger := slog.Default()
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	runCtx := runner.NewContext(logger, httpClient, cfg)
+
+	scripts := []runner.Script{example.New()}
+	var wg sync.WaitGroup
+	for _, script := range scripts {
+		wg.Add(1)
+		go func(s runner.Script) {
+			defer wg.Done()
+			if err := runner.Run(ctx, s, runCtx, st); err != nil {
+				slog.Error("runner exited", "script", s.Name(), "err", err)
+			}
+		}(script)
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/scripts", web.NewScriptsHandler(st, nil))
@@ -90,13 +111,17 @@ func run() error {
 	case <-ctx.Done():
 		slog.Info("notinv shutting down")
 	case err := <-serverErr:
+		wg.Wait()
+		writer.Close()
 		return errors.Join(fmt.Errorf("serve: %w", err), st.Close())
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	err = srv.Shutdown(shutdownCtx)
-	return errors.Join(err, st.Close())
+	srvErr := srv.Shutdown(shutdownCtx)
+	wg.Wait()
+	writer.Close()
+	return errors.Join(srvErr, st.Close())
 }
 
 func loadEnvFile(path string, explicit bool) error {

@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/joho/godotenv v1.5.1
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/tursodatabase/go-libsql v0.0.0-20260424063416-3051e37e6e04
 )
 
