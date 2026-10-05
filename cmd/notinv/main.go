@@ -10,12 +10,17 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 
 	"github.com/trriplejay/notinv/internal/config"
+	"github.com/trriplejay/notinv/internal/store"
 )
+
+const retentionInterval = 24 * time.Hour
 
 // version is overridden at build time via -ldflags "-X main.version=...".
 var version = "dev"
@@ -27,7 +32,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (retErr error) {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	envFile := flag.String("env-file", ".env", "dotenv file to load")
 	flag.Parse()
@@ -55,7 +60,42 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	st, err := store.Open(ctx, cfg.DatabaseURL, cfg.DatabaseAuthToken)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	var wg sync.WaitGroup
+	defer func() {
+		wg.Wait()
+		retErr = errors.Join(retErr, st.Close())
+	}()
+
 	slog.Info("notinv starting", "version", version)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(retentionInterval)
+		defer ticker.Stop()
+
+		for {
+			// Sweep at startup and after each tick. Recheck cancellation because
+			// select may choose a ready tick even when ctx.Done is also ready.
+			if ctx.Err() != nil {
+				return
+			}
+			cutoff := time.Now().AddDate(0, 0, -cfg.RetentionDays)
+			if err := st.DeleteOlderThan(ctx, cutoff); err != nil {
+				slog.Error("retention delete failed", "err", err)
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 
 	<-ctx.Done()
 

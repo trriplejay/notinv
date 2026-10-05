@@ -28,6 +28,86 @@ func openTestStore(t *testing.T) (*Store, string) {
 	return s, dsn
 }
 
+func TestDeleteOlderThan(t *testing.T) {
+	s, _ := openTestStore(t)
+	ctx := t.Context()
+	cutoff := time.Date(2025, time.January, 2, 3, 4, 5, 123000000, time.UTC)
+	starts := []time.Time{
+		cutoff.Add(-48 * time.Hour),
+		cutoff.Add(-time.Millisecond),
+		cutoff,
+		cutoff.Add(time.Millisecond),
+		cutoff.Add(48 * time.Hour),
+	}
+	var requests []Request
+	for _, start := range starts {
+		requests = append(requests, Request{Script: "retention", Method: "GET", URL: "https://example.com", StartedAt: start})
+		if err := s.InsertRun(ctx, Run{Script: "retention", StartedAt: start, OK: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.InsertRequests(ctx, requests); err != nil {
+		t.Fatal(err)
+	}
+	// A second call also exercises an already-drained store.
+	for range 2 {
+		if err := s.DeleteOlderThan(ctx, cutoff); err != nil {
+			t.Fatal(err)
+		}
+		for _, query := range []struct {
+			statement string
+			want      int
+		}{
+			{`SELECT count(*) FROM requests WHERE started_at < ?`, 0},
+			{`SELECT count(*) FROM runs WHERE started_at < ?`, 0},
+			{`SELECT count(*) FROM requests WHERE started_at = ?`, 1},
+			{`SELECT count(*) FROM runs WHERE started_at = ?`, 1},
+			{`SELECT count(*) FROM requests WHERE started_at > ?`, 2},
+			{`SELECT count(*) FROM runs WHERE started_at > ?`, 2},
+		} {
+			var count int
+			if err := s.db.QueryRowContext(ctx, query.statement, cutoff.UnixMilli()).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != query.want {
+				t.Errorf("%s: count = %d, want %d", query.statement, count, query.want)
+			}
+		}
+	}
+}
+
+func TestDeleteOlderThanMultipleBatches(t *testing.T) {
+	s, _ := openTestStore(t)
+	ctx := t.Context()
+	cutoff := time.Date(2025, time.January, 2, 0, 0, 0, 0, time.UTC)
+	requests := make([]Request, retentionBatchSize+100)
+	for i := range requests {
+		requests[i] = Request{Script: "backlog", Method: "GET", URL: "https://example.com", StartedAt: cutoff.Add(-time.Hour)}
+	}
+	if err := s.InsertRequests(ctx, requests); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteOlderThan(ctx, cutoff); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM requests`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("backlog retained %d of %d old rows", count, len(requests))
+	}
+}
+
+func TestDeleteOlderThanCanceled(t *testing.T) {
+	s, _ := openTestStore(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := s.DeleteOlderThan(ctx, time.UnixMilli(0)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected wrapped cancellation, got %v", err)
+	}
+}
+
 func TestRoundTripAndQueries(t *testing.T) {
 	s, _ := openTestStore(t)
 	ctx := t.Context()
