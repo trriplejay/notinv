@@ -8,13 +8,17 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 
 	"github.com/trriplejay/notinv/internal/config"
+	"github.com/trriplejay/notinv/internal/store"
+	"github.com/trriplejay/notinv/internal/web"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -55,12 +59,44 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	st, err := store.Open(ctx, cfg.DatabaseURL, cfg.DatabaseAuthToken)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /api/scripts", web.NewScriptsHandler(st, nil))
+	mux.Handle("GET /api/scripts/{name}/runs", web.NewRunsHandler(st, nil))
+	mux.Handle("GET /api/scripts/{name}/requests", web.NewRequestsHandler(st, nil))
+	mux.Handle("GET /healthz", web.NewHealthHandler(st))
+
+	srv := &http.Server{
+		Addr:              cfg.Listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
 	slog.Info("notinv starting", "version", version)
 
-	<-ctx.Done()
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+		close(serverErr)
+	}()
 
-	slog.Info("notinv shutting down")
-	return nil
+	select {
+	case <-ctx.Done():
+		slog.Info("notinv shutting down")
+	case err := <-serverErr:
+		return errors.Join(fmt.Errorf("serve: %w", err), st.Close())
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err = srv.Shutdown(shutdownCtx)
+	return errors.Join(err, st.Close())
 }
 
 func loadEnvFile(path string, explicit bool) error {
