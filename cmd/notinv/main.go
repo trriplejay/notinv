@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -17,7 +18,10 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/trriplejay/notinv/internal/config"
+	"github.com/trriplejay/notinv/internal/rc"
+	"github.com/trriplejay/notinv/internal/runner"
 	"github.com/trriplejay/notinv/internal/store"
+	"github.com/trriplejay/notinv/scripts/example"
 )
 
 const retentionInterval = 24 * time.Hour
@@ -32,7 +36,7 @@ func main() {
 	}
 }
 
-func run() (retErr error) {
+func run() error {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	envFile := flag.String("env-file", ".env", "dotenv file to load")
 	flag.Parse()
@@ -60,15 +64,27 @@ func run() (retErr error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	st, err := store.Open(ctx, cfg.DatabaseURL, cfg.DatabaseAuthToken)
+	db, err := store.Open(ctx, cfg.DatabaseURL, cfg.DatabaseAuthToken)
 	if err != nil {
-		return fmt.Errorf("open store: %w", err)
+		return fmt.Errorf("open recording store: %w", err)
 	}
+	writer := rc.NewWriter(db, version, slog.Default(), rc.Options{})
+
+	logger := slog.Default()
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	runCtx := runner.NewContext(logger, httpClient, cfg)
+
+	scripts := []runner.Script{example.New()}
 	var wg sync.WaitGroup
-	defer func() {
-		wg.Wait()
-		retErr = errors.Join(retErr, st.Close())
-	}()
+	for _, script := range scripts {
+		wg.Add(1)
+		go func(s runner.Script) {
+			defer wg.Done()
+			if err := runner.Run(ctx, s, runCtx, db); err != nil {
+				slog.Error("runner exited", "script", s.Name(), "err", err)
+			}
+		}(script)
+	}
 
 	slog.Info("notinv starting", "version", version)
 
@@ -85,7 +101,7 @@ func run() (retErr error) {
 				return
 			}
 			cutoff := time.Now().AddDate(0, 0, -cfg.RetentionDays)
-			if err := st.DeleteOlderThan(ctx, cutoff); err != nil {
+			if err := db.DeleteOlderThan(ctx, cutoff); err != nil {
 				slog.Error("retention delete failed", "err", err)
 			}
 
@@ -100,6 +116,11 @@ func run() (retErr error) {
 	<-ctx.Done()
 
 	slog.Info("notinv shutting down")
+	wg.Wait()
+	writer.Close()
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("close recording store: %w", err)
+	}
 	return nil
 }
 
