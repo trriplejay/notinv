@@ -87,10 +87,16 @@ func run() error {
 		}(script)
 	}
 
+	schedules := make(map[string]string, len(scripts))
+	for _, script := range scripts {
+		schedules[script.Name()] = script.Schedule()
+	}
+
 	mux := http.NewServeMux()
-	mux.Handle("GET /api/scripts", web.NewScriptsHandler(st, nil))
+	mux.Handle("GET /api/scripts", web.NewScriptsHandler(st, schedules, nil))
 	mux.Handle("GET /api/scripts/{name}/runs", web.NewRunsHandler(st, nil))
 	mux.Handle("GET /api/scripts/{name}/requests", web.NewRequestsHandler(st, nil))
+	mux.Handle("GET /api/scripts/{name}/requests/series", web.NewSeriesHandler(st, nil))
 	mux.Handle("GET /healthz", web.NewHealthHandler(st))
 
 	srv := &http.Server{

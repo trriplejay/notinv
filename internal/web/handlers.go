@@ -3,7 +3,9 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/trriplejay/notinv/internal/store"
@@ -14,9 +16,10 @@ type RunQuerier interface {
 	QueryRuns(ctx context.Context, script string, since, until time.Time) ([]store.Run, error)
 }
 
-// ScriptLister supplies script names, latest runs, and windowed run history.
+// ScriptLister supplies script names, latest runs, and windowed run and request history.
 type ScriptLister interface {
 	RunQuerier
+	RequestQuerier
 	ListScripts(ctx context.Context) ([]string, error)
 	LatestRun(ctx context.Context, script string) (*store.Run, error)
 }
@@ -38,10 +41,12 @@ type latestDTO struct {
 }
 
 type scriptDTO struct {
-	Name     string     `json:"name"`
-	Latest   *latestDTO `json:"latest"`
-	Uptime   float64    `json:"uptime"`
-	Schedule string     `json:"schedule"`
+	Name       string     `json:"name"`
+	Latest     *latestDTO `json:"latest"`
+	Uptime     float64    `json:"uptime"`
+	Schedule   string     `json:"schedule"`
+	AvgLatency float64    `json:"avgLatency"`
+	P95Latency float64    `json:"p95Latency"`
 }
 
 type runDTO struct {
@@ -58,9 +63,17 @@ type requestDTO struct {
 	AvgLatency float64 `json:"avgLatency"`
 }
 
-// NewScriptsHandler serves GET /api/scripts. Uptime is an OK/total ratio over
-// the last seven days. A nil now uses time.Now.
-func NewScriptsHandler(db ScriptLister, now func() time.Time) http.Handler {
+type seriesDTO struct {
+	URL     string  `json:"url"`
+	Time    string  `json:"time"`
+	Latency int64   `json:"latency"`
+	Status  int     `json:"status"`
+	Error   *string `json:"error"`
+}
+
+// NewScriptsHandler serves GET /api/scripts. Uptime and request latencies cover
+// the last seven days. Schedules are keyed by script name. A nil now uses time.Now.
+func NewScriptsHandler(db ScriptLister, schedules map[string]string, now func() time.Time) http.Handler {
 	now = clock(now)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		until := now()
@@ -82,7 +95,24 @@ func NewScriptsHandler(db ScriptLister, now func() time.Time) http.Handler {
 				http.Error(w, "cannot read runs", http.StatusInternalServerError)
 				return
 			}
-			item := scriptDTO{Name: name, Schedule: ""}
+			requests, err := db.QueryRequests(r.Context(), name, since, until)
+			if err != nil {
+				http.Error(w, "cannot read requests", http.StatusInternalServerError)
+				return
+			}
+			item := scriptDTO{Name: name, Schedule: schedules[name]}
+			if len(requests) > 0 {
+				latencies := make([]int64, 0, len(requests))
+				for _, request := range requests {
+					item.AvgLatency += float64(request.DurationMs)
+					latencies = append(latencies, request.DurationMs)
+				}
+				item.AvgLatency /= float64(len(requests))
+				sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+				index := int(math.Ceil(0.95*float64(len(latencies)))) - 1
+				index = max(0, min(index, len(latencies)-1))
+				item.P95Latency = float64(latencies[index])
+			}
 			if latest != nil {
 				item.Latest = &latestDTO{Time: latest.StartedAt.Format(time.RFC3339), OK: latest.OK, Error: latest.Err}
 			}
@@ -163,6 +193,33 @@ func NewRequestsHandler(db RequestQuerier, now func() time.Time) http.Handler {
 			if out[i].Count > 0 {
 				out[i].AvgLatency /= float64(out[i].Count)
 			}
+		}
+		writeJSON(w, out)
+	})
+}
+
+// NewSeriesHandler serves GET /api/scripts/{name}/requests/series with one point
+// per request, in ascending start-time order. A nil now uses time.Now.
+func NewSeriesHandler(db RequestQuerier, now func() time.Time) http.Handler {
+	now = clock(now)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		until := now()
+		since, err := windowStart(r, until)
+		if err != nil {
+			http.Error(w, "since must be RFC3339", http.StatusBadRequest)
+			return
+		}
+		requests, err := db.QueryRequests(r.Context(), r.PathValue("name"), since, until)
+		if err != nil {
+			http.Error(w, "cannot read requests", http.StatusInternalServerError)
+			return
+		}
+		out := []seriesDTO{}
+		for _, request := range requests {
+			out = append(out, seriesDTO{
+				URL: request.URL, Time: request.StartedAt.Format(time.RFC3339),
+				Latency: request.DurationMs, Status: request.StatusCode, Error: request.Err,
+			})
 		}
 		writeJSON(w, out)
 	})
