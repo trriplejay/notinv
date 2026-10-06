@@ -83,6 +83,11 @@ func databaseDSN(databaseURL, authToken string) (string, string, error) {
 	}
 }
 
+// Ping checks database reachability using the caller's context.
+func (s *Store) Ping(ctx context.Context) error {
+	return s.wrap("ping", s.db.PingContext(ctx))
+}
+
 // Close releases the database handle.
 func (s *Store) Close() error {
 	return s.wrap("close", s.db.Close())
