@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>notinv · Monitoring</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f3f6fa; --text: #17243b; --muted: #53637b;
+      --card: #fff; --chart: #f9fbfe; --border: #d5dfec; --accent: #245ad4;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --bg: #101722; --text: #e5edf9; --muted: #a7b7ce;
+        --card: #192334; --chart: #131d2c; --border: #35465e; --accent: #9bb9ff;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, sans-serif; }
+    main { max-width: 1280px; margin: auto; padding: 32px 20px; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 24px; flex-wrap: wrap; }
+    h1 { margin: 0; letter-spacing: -.04em; font-size: 2.25rem; }
+    h2 { margin: 0; font-size: 1.25rem; overflow-wrap: anywhere; }
+    p { margin: 8px 0; }
+    .muted, dt { color: var(--muted); }
+    label { font-weight: 600; }
+    select { margin-left: 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--text); font: inherit; }
+    select:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    #status { min-height: 24px; margin: 24px 0; color: var(--muted); }
+    #scripts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr)); gap: 24px; }
+    article { min-width: 0; padding: 24px; border: 1px solid var(--border); border-radius: 16px; background: var(--card); }
+    .badge { display: inline-block; font-size: .85rem; padding: 2px 9px; border: 1px solid currentColor; border-radius: 20px; margin: 8px 0; }
+    .last-run { overflow-wrap: anywhere; }
+    dl { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 24px 0; }
+    dt { font-size: .8rem; }
+    dd { margin: 2px 0 0; font-size: 1.1rem; font-weight: 600; overflow-wrap: anywhere; }
+    .chart { position: relative; height: 280px; padding: 8px; border-radius: 8px; background: var(--chart); }
+    .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: .8rem; color: var(--muted); margin-top: 12px; }
+    .legend span::before { content: ''; display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; background: var(--dot); }
+    .error { color: #c44371; }
+    @media (max-width: 520px) { main { padding: 20px 12px; } article { padding: 16px; } }
+  </style>
+  <script src="vendor/chart.umd.min.js" defer></script>
+  <script src="vendor/chartjs-adapter-date-fns.bundle.min.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>notinv</h1><p class="muted">Live script monitoring</p></div>
+      <label for="range">Request window
+        <select id="range">
+          <option value="1h">1h</option>
+          <option value="24h" selected>24h</option>
+          <option value="7d">7d</option>
+        </select>
+      </label>
+    </header>
+    <p class="muted">Uptime and latency summaries cover the last 7 days. Request counts and charts use the selected window.</p>
+    <p id="status" role="status" aria-live="polite">Loading monitoring data…</p>
+    <section id="scripts" aria-label="Monitored scripts"></section>
+    <noscript>Enable JavaScript to load live monitoring data.</noscript>
+  </main>
+  <script>
+    'use strict';
+    const REFRESH_MS = 30000;
+    const RANGE_MS = { '1h': 3600000, '24h': 86400000, '7d': 604800000 };
+    const COLORS = { success: '#169b75', warning: '#d18a0a', server: '#e05252', error: '#bd54d4', other: '#8291a8' };
+    const charts = [];
+    let generation = 0;
+    let activeRequest;
+
+    function pointColor(point) {
+      if (point.error) return COLORS.error;
+      if (point.status >= 500) return COLORS.server;
+      if (point.status >= 400) return COLORS.warning;
+      if (point.status >= 200 && point.status < 400) return COLORS.success;
+      return COLORS.other;
+    }
+
+    function datasetsFor(points) {
+      const groups = new Map();
+      for (const point of points) {
+        if (!groups.has(point.url)) groups.set(point.url, []);
+        groups.get(point.url).push(point);
+      }
+      return Array.from(groups, ([url, requests], index) => ({
+        label: url,
+        data: requests.map(point => ({ x: new Date(point.time), y: point.latency, status: point.status, error: point.error })),
+        borderColor: `hsl(${(index * 137.5 + 210) % 360}, 65%, 55%)`,
+        pointBackgroundColor: requests.map(pointColor),
+        pointBorderColor: requests.map(pointColor),
+        pointRadius: 4,
+        borderWidth: 2,
+        tension: 0.15,
+      }));
+    }
+
+    function element(tag, text, className) {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = text;
+      if (className) node.className = className;
+      return node;
+    }
+
+    function metric(list, label, value) {
+      const item = element('div');
+      item.append(element('dt', label), element('dd', value));
+      list.append(item);
+    }
+
+    function renderCard(script, points, seriesError, since, until, range) {
+      const card = element('article');
+      card.append(element('h2', script.name));
+      const latest = script.latest;
+      card.append(element('span', latest ? (latest.ok ? 'Passing' : 'Failing') : 'Not run yet', 'badge'));
+      if (latest) {
+        const lastRun = element('p', 'Last run: ', 'last-run');
+        const time = element('time', new Date(latest.time).toLocaleString());
+        time.dateTime = latest.time;
+        lastRun.append(time, document.createTextNode(` · ${latest.error !== null ? latest.error : 'OK'}`));
+        card.append(lastRun);
+      } else {
+        card.append(element('p', 'Last run: no runs recorded', 'last-run muted'));
+      }
+      const metrics = element('dl');
+      metric(metrics, 'Schedule', script.schedule || 'Not scheduled');
+      const failing = points.filter(point => point.status >= 400 || point.error).length;
+      metric(metrics, `Requests (${range})`, seriesError ? 'Unavailable' : `${points.length - failing} ok / ${failing} failing`);
+      metric(metrics, 'Uptime (7d)', `${(script.uptime * 100).toFixed(1)}%`);
+      metric(metrics, 'Average latency (7d)', `${script.avgLatency.toFixed(1)} ms`);
+      metric(metrics, 'p95 latency (7d)', `${script.p95Latency.toFixed(1)} ms`);
+      card.append(metrics);
+      const container = element('div', undefined, 'chart');
+      const canvas = element('canvas');
+      canvas.setAttribute('role', 'img');
+      canvas.setAttribute('aria-label', `Request latency over time for ${script.name}`);
+      container.append(canvas);
+      card.append(container);
+      const note = element('p', seriesError ? `Request history unavailable: ${seriesError}` : (points.length ? 'Latency over time · milliseconds' : 'No requests in this window.'), seriesError ? 'error' : 'muted');
+      card.append(note);
+      const legend = element('div', undefined, 'legend');
+      for (const [key, label] of Object.entries({ success: '2xx / 3xx', warning: '4xx', server: '5xx+', error: 'Request error', other: 'Other status' })) {
+        const item = element('span', label);
+        item.style.setProperty('--dot', COLORS[key]);
+        legend.append(item);
+      }
+      card.append(legend);
+      document.getElementById('scripts').append(card);
+      if (seriesError) return;
+      try {
+        const style = getComputedStyle(document.documentElement);
+        const text = style.getPropertyValue('--muted').trim();
+        const grid = style.getPropertyValue('--border').trim();
+        charts.push(new Chart(canvas, {
+          type: 'line',
+          data: { datasets: datasetsFor(points) },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            plugins: {
+              legend: { labels: { color: text, boxWidth: 12 } },
+              tooltip: { callbacks: { afterLabel: context => `Status: ${context.raw.status}${context.raw.error ? ` · ${context.raw.error}` : ''}` } },
+            },
+            scales: {
+              x: { type: 'time', min: Date.parse(since), max: until, ticks: { color: text }, grid: { color: grid } },
+              y: { beginAtZero: true, title: { display: true, text: 'Latency (ms)', color: text }, ticks: { color: text }, grid: { color: grid } },
+            },
+          },
+        }));
+      } catch (error) {
+        note.textContent = `Chart unavailable: ${error.message}`;
+        note.className = 'error';
+      }
+    }
+
+    async function fetchJSON(url, signal) {
+      const response = await fetch(url, { signal, cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    }
+
+    async function refresh() {
+      const current = ++generation;
+      if (activeRequest) activeRequest.abort();
+      activeRequest = new AbortController();
+      const signal = activeRequest.signal;
+      const range = document.getElementById('range').value;
+      const until = Date.now();
+      const since = new Date(until - RANGE_MS[range]).toISOString();
+      const status = document.getElementById('status');
+      status.textContent = 'Refreshing monitoring data…';
+      try {
+        const scripts = await fetchJSON('/api/scripts', signal);
+        const results = await Promise.all(scripts.map(async script => {
+          try {
+            const points = await fetchJSON(`/api/scripts/${encodeURIComponent(script.name)}/requests/series?since=${encodeURIComponent(since)}`, signal);
+            return { script, points, error: null };
+          } catch (error) {
+            return { script, points: [], error: error.message };
+          }
+        }));
+        if (current !== generation) return;
+        charts.splice(0).forEach(chart => chart.destroy());
+        document.getElementById('scripts').replaceChildren();
+        for (const result of results) renderCard(result.script, result.points, result.error, since, until, range);
+        const failures = results.filter(result => result.error).length;
+        status.textContent = scripts.length
+          ? `Updated ${new Date().toLocaleTimeString()} · Refreshes every 30 seconds${failures ? ` · ${failures} request histories unavailable` : ''}`
+          : 'No scripts have reported yet. Refreshes every 30 seconds.';
+      } catch (error) {
+        if (current !== generation) return;
+        status.textContent = `Could not refresh: ${error.message}. Previously displayed data may be stale; retrying every 30 seconds.`;
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('range').addEventListener('change', refresh);
+      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', refresh);
+      refresh();
+      setInterval(refresh, REFRESH_MS);
+    });
+  </script>
+</body>
+</html>

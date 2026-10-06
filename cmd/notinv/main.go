@@ -23,6 +23,7 @@ import (
 	"github.com/trriplejay/notinv/internal/store"
 	"github.com/trriplejay/notinv/internal/web"
 	"github.com/trriplejay/notinv/scripts/example"
+	dashboard "github.com/trriplejay/notinv/web"
 )
 
 const retentionInterval = 24 * time.Hour
@@ -93,6 +94,7 @@ func run() error {
 	}
 
 	mux := http.NewServeMux()
+	mux.Handle("GET /", dashboard.Handler())
 	mux.Handle("GET /api/scripts", web.NewScriptsHandler(st, schedules, nil))
 	mux.Handle("GET /api/scripts/{name}/runs", web.NewRunsHandler(st, nil))
 	mux.Handle("GET /api/scripts/{name}/requests", web.NewRequestsHandler(st, nil))
