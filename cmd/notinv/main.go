@@ -24,6 +24,7 @@ import (
 	"github.com/trriplejay/notinv/internal/store"
 	"github.com/trriplejay/notinv/internal/web"
 	"github.com/trriplejay/notinv/scripts/example"
+	webassets "github.com/trriplejay/notinv/web"
 )
 
 const retentionInterval = 24 * time.Hour
@@ -80,11 +81,12 @@ func run() error {
 	cancelRuns, drainDone := startRunners(ctx, scripts, services, st)
 	defer cancelRuns()
 
-	mux := http.NewServeMux()
-	mux.Handle("GET /api/scripts", web.NewScriptsHandler(st, nil))
-	mux.Handle("GET /api/scripts/{name}/runs", web.NewRunsHandler(st, nil))
-	mux.Handle("GET /api/scripts/{name}/requests", web.NewRequestsHandler(st, nil))
-	mux.Handle("GET /healthz", web.NewHealthHandler(st))
+	schedules := make(map[string]string, len(scripts))
+	for _, script := range scripts {
+		schedules[script.Name()] = script.Schedule()
+	}
+
+	mux := newMux(st, schedules)
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -240,6 +242,17 @@ func orchestrateShutdown(budget shutdownBudget, drainDone <-chan struct{}, cance
 		httpErr = nil
 	}
 	return errors.Join(httpErr, dbClose())
+}
+
+func newMux(st *store.Store, schedules map[string]string) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("GET /", webassets.Handler())
+	mux.Handle("GET /api/scripts", web.NewScriptsHandler(st, schedules, nil))
+	mux.Handle("GET /api/scripts/{name}/runs", web.NewRunsHandler(st, nil))
+	mux.Handle("GET /api/scripts/{name}/requests", web.NewRequestsHandler(st, nil))
+	mux.Handle("GET /api/scripts/{name}/requests/series", web.NewSeriesHandler(st, nil))
+	mux.Handle("GET /healthz", web.NewHealthHandler(st))
+	return mux
 }
 
 func loadEnvFile(path string, explicit bool) error {
