@@ -2,17 +2,25 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/joho/godotenv"
 
 	"github.com/trriplejay/notinv/internal/config"
+	"github.com/trriplejay/notinv/internal/runner"
+	"github.com/trriplejay/notinv/internal/store"
 )
 
 // CLM-11: an absent implicit .env must not change the environment.
@@ -150,4 +158,307 @@ func TestEnvExampleParses(t *testing.T) {
 			t.Errorf("example missing %s", key)
 		}
 	}
+}
+
+// CLM-2, CLM-3: every validated level and format changes emitted records.
+func TestNewLogger(t *testing.T) {
+	levels := []struct {
+		name  string
+		level slog.Level
+	}{
+		{"debug", slog.LevelDebug}, {"info", slog.LevelInfo},
+		{"warn", slog.LevelWarn}, {"error", slog.LevelError},
+	}
+	for _, format := range []string{"text", "json"} {
+		for _, configured := range levels {
+			t.Run(format+"/"+configured.name, func(t *testing.T) {
+				var output bytes.Buffer
+				logger := newLogger(&output, configured.name, format)
+				for _, record := range levels {
+					output.Reset()
+					logger.Log(context.Background(), record.level, "record")
+					if record.level < configured.level {
+						if output.Len() != 0 {
+							t.Errorf("%s was not filtered: %s", record.name, output.String())
+						}
+						continue
+					}
+					if format == "json" {
+						var got map[string]any
+						if err := json.Unmarshal(output.Bytes(), &got); err != nil {
+							t.Fatalf("invalid JSON: %v", err)
+						}
+						if got["level"] != record.level.String() || got["msg"] != "record" {
+							t.Errorf("unexpected record: %v", got)
+						}
+					} else if json.Valid(output.Bytes()) || !strings.Contains(output.String(), "level="+record.level.String()) {
+						t.Errorf("expected text record, got %q", output.String())
+					}
+				}
+			})
+		}
+	}
+}
+
+// CLM-6, CLM-7, CLM-8: neither cancellation nor teardown jumps the drain.
+func TestOrchestrateShutdownDrain(t *testing.T) {
+	for _, completes := range []bool{true, false} {
+		name := "timeout"
+		if completes {
+			name = "completion"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				budget := shutdownBudget{overall: 80 * time.Millisecond, drain: 50 * time.Millisecond}
+				drainDone := make(chan struct{})
+				finished := make(chan error, 1)
+				var order []string
+				var mu sync.Mutex
+				record := func(step string) {
+					mu.Lock()
+					defer mu.Unlock()
+					order = append(order, step)
+				}
+				var output bytes.Buffer
+				started := time.Now()
+				go func() {
+					finished <- orchestrateShutdown(budget, drainDone,
+						func() { record("cancel") },
+						func(ctx context.Context) error {
+							record("http")
+							deadline, ok := ctx.Deadline()
+							if !ok || !deadline.Equal(started.Add(budget.overall)) {
+								t.Errorf("HTTP deadline = %v, want shared deadline %v", deadline, started.Add(budget.overall))
+							}
+							return nil
+						}, func() error {
+							record("db")
+							return nil
+						}, newLogger(&output, "debug", "text"))
+				}()
+				synctest.Wait()
+				time.Sleep(10 * time.Millisecond)
+				synctest.Wait()
+				mu.Lock()
+				premature := append([]string(nil), order...)
+				mu.Unlock()
+				if len(premature) != 0 {
+					t.Fatalf("shutdown preceded drain: %v", premature)
+				}
+				wantElapsed := budget.drain
+				if completes {
+					record("completed")
+					close(drainDone)
+					wantElapsed = 10 * time.Millisecond
+				}
+				if err := <-finished; err != nil {
+					t.Fatalf("shutdown: %v", err)
+				}
+				if elapsed := time.Since(started); elapsed != wantElapsed {
+					t.Errorf("drain elapsed %v, want %v", elapsed, wantElapsed)
+				}
+				want := []string{"cancel", "http", "db"}
+				if completes {
+					want = append([]string{"completed"}, want...)
+				}
+				if !reflect.DeepEqual(order, want) {
+					t.Errorf("order = %v, want %v", order, want)
+				}
+				if strings.Contains(output.String(), "level=ERROR") {
+					t.Errorf("clean shutdown logged error: %s", output.String())
+				}
+			})
+		})
+	}
+}
+
+func TestShutdownBudget(t *testing.T) {
+	budget := defaultShutdownBudget()
+	if budget.overall != 8*time.Second || budget.drain != 5*time.Second {
+		t.Fatalf("production budget = %+v", budget)
+	}
+	if total := budget.drain + budget.httpShutdown(budget.drain); total > budget.overall || total >= 10*time.Second {
+		t.Errorf("shutdown timeouts total %v", total)
+	}
+	for _, b := range []shutdownBudget{budget, {overall: 90 * time.Millisecond, drain: 20 * time.Millisecond}} {
+		for _, elapsed := range []time.Duration{0, b.drain, b.overall, b.overall + time.Second} {
+			want := b.overall - elapsed
+			if want < 0 {
+				want = 0
+			}
+			if got := b.httpShutdown(elapsed); got != want {
+				t.Errorf("remaining HTTP budget = %v, want %v", got, want)
+			}
+		}
+	}
+}
+
+type shutdownScript struct {
+	run func(context.Context) error
+}
+
+func (s shutdownScript) Name() string                                     { return "shutdown-test" }
+func (s shutdownScript) Schedule() string                                 { return "@every 1s" }
+func (s shutdownScript) Run(ctx context.Context, _ *runner.Context) error { return s.run(ctx) }
+
+type shutdownRunStore struct {
+	insert func(context.Context, store.Run) error
+}
+
+func (s shutdownRunStore) InsertRun(ctx context.Context, run store.Run) error {
+	return s.insert(ctx, run)
+}
+
+// CLM-1, CLM-2, CLM-6: exercise the production scheduling/context adapter,
+// including persistence after a simulated signal, not just a fake drain channel.
+func TestShutdownInFlightRun(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var output bytes.Buffer
+		logger := newLogger(&output, "debug", "text")
+		ctx, signalStop := context.WithCancel(context.Background())
+		defer signalStop()
+		started := make(chan context.Context, 1)
+		release := make(chan struct{})
+		completed := false
+		recorded := false
+		script := shutdownScript{run: func(ctx context.Context) error {
+			started <- ctx
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-release:
+				completed = true
+				return nil
+			}
+		}}
+		st := shutdownRunStore{insert: func(ctx context.Context, run store.Run) error {
+			if ctx.Err() != nil || !run.OK {
+				t.Errorf("completion lost: context=%v run=%+v", ctx.Err(), run)
+			}
+			recorded = true
+			return nil
+		}}
+		cancelRuns, done := startRunners(ctx, []runner.Script{script}, &runner.Context{Log: logger}, st)
+		defer cancelRuns()
+		runCtx := <-started
+		signalStop()
+		synctest.Wait()
+		if runCtx.Err() != nil {
+			t.Fatal("signal cancelled the active run")
+		}
+		finished := make(chan error, 1)
+		var order []string
+		go func() {
+			finished <- orchestrateShutdown(shutdownBudget{overall: 80 * time.Millisecond, drain: 50 * time.Millisecond},
+				done, cancelRuns, func(ctx context.Context) error {
+					if _, ok := ctx.Deadline(); !ok {
+						t.Error("HTTP shutdown has no timeout")
+					}
+					if !completed || !recorded {
+						t.Error("HTTP shutdown preceded normal run completion/persistence")
+					}
+					if runCtx.Err() == nil {
+						t.Error("run context not cancelled after drain")
+					}
+					order = append(order, "http")
+					return nil
+				}, func() error {
+					order = append(order, "db")
+					return nil
+				}, logger)
+		}()
+		synctest.Wait()
+		time.Sleep(10 * time.Millisecond)
+		close(release)
+		if err := <-finished; err != nil {
+			t.Fatalf("shutdown: %v", err)
+		}
+		if !reflect.DeepEqual(order, []string{"http", "db"}) {
+			t.Errorf("order = %v", order)
+		}
+		if strings.Contains(output.String(), "level=ERROR") {
+			t.Errorf("clean stop logged error: %s", output.String())
+		}
+	})
+}
+
+func TestOrchestrateShutdownErrors(t *testing.T) {
+	httpFailure := errors.New("HTTP shutdown failed")
+	dbFailure := errors.New("DB close failed")
+	for _, httpErr := range []error{nil, http.ErrServerClosed, httpFailure} {
+		var output bytes.Buffer
+		done := make(chan struct{})
+		close(done)
+		err := orchestrateShutdown(defaultShutdownBudget(), done, func() {},
+			func(context.Context) error { return httpErr }, func() error { return dbFailure },
+			newLogger(&output, "debug", "text"))
+		if !errors.Is(err, dbFailure) {
+			t.Errorf("DB error lost: %v", err)
+		}
+		if errors.Is(err, httpFailure) != errors.Is(httpErr, httpFailure) {
+			t.Errorf("HTTP error lost: %v", err)
+		}
+		if errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("normal server close returned as error: %v", err)
+		}
+	}
+}
+
+func TestShutdownIdleRunners(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, signalStop := context.WithCancel(context.Background())
+		defer signalStop()
+		var output bytes.Buffer
+		logger := newLogger(&output, "debug", "text")
+		script := shutdownScript{run: func(context.Context) error {
+			t.Error("idle runner started a script during shutdown")
+			return nil
+		}}
+		cancelRuns, done := startRunners(ctx, []runner.Script{script}, &runner.Context{Log: logger}, nil)
+		defer cancelRuns()
+		synctest.Wait()
+		signalStop()
+		started := time.Now()
+		if err := orchestrateShutdown(defaultShutdownBudget(), done, cancelRuns,
+			func(context.Context) error { return nil }, func() error { return nil }, logger); err != nil {
+			t.Fatalf("shutdown: %v", err)
+		}
+		if elapsed := time.Since(started); elapsed != 0 {
+			t.Errorf("idle runners consumed drain window: %v", elapsed)
+		}
+	})
+}
+
+func TestShutdownCancelsRunAtDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, signalStop := context.WithCancel(context.Background())
+		defer signalStop()
+		var output bytes.Buffer
+		logger := newLogger(&output, "debug", "text")
+		started := make(chan context.Context, 1)
+		script := shutdownScript{run: func(ctx context.Context) error {
+			started <- ctx
+			<-ctx.Done()
+			return ctx.Err()
+		}}
+		st := shutdownRunStore{insert: func(context.Context, store.Run) error { return nil }}
+		cancelRuns, done := startRunners(ctx, []runner.Script{script}, &runner.Context{Log: logger}, st)
+		defer cancelRuns()
+		runCtx := <-started
+		signalStop()
+		budget := shutdownBudget{overall: 80 * time.Millisecond, drain: 50 * time.Millisecond}
+		start := time.Now()
+		if err := orchestrateShutdown(budget, done, cancelRuns, func(context.Context) error {
+			if runCtx.Err() == nil {
+				t.Error("overdue run was not cancelled before HTTP shutdown")
+			}
+			return nil
+		}, func() error { return nil }, logger); err != nil {
+			t.Fatalf("shutdown: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed != budget.drain {
+			t.Errorf("run cancelled after %v, want %v", elapsed, budget.drain)
+		}
+		<-done
+	})
 }

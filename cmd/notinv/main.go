@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -61,7 +62,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	warnIfDryRun(slog.Default(), cfg)
+	logger := newLogger(os.Stderr, cfg.LogLevel, cfg.LogFormat)
+	slog.SetDefault(logger)
+	warnIfDryRun(logger, cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -70,23 +73,13 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
-	writer := rc.NewWriter(st, version, slog.Default(), rc.Options{})
+	writer := rc.NewWriter(st, version, logger, rc.Options{})
 
-	logger := slog.Default()
 	httpClient := &http.Client{Timeout: 30 * time.Second}
-	runCtx := runner.NewContext(logger, httpClient, cfg)
-
+	services := runner.NewContext(logger, httpClient, cfg)
 	scripts := []runner.Script{example.New()}
-	var wg sync.WaitGroup
-	for _, script := range scripts {
-		wg.Add(1)
-		go func(s runner.Script) {
-			defer wg.Done()
-			if err := runner.Run(ctx, s, runCtx, st); err != nil {
-				slog.Error("runner exited", "script", s.Name(), "err", err)
-			}
-		}(script)
-	}
+	cancelRuns, drainDone := startRunners(ctx, scripts, services, st)
+	defer cancelRuns()
 
 	schedules := make(map[string]string, len(scripts))
 	for _, script := range scripts {
@@ -103,6 +96,7 @@ func run() error {
 
 	slog.Info("notinv starting", "version", version)
 
+	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -116,7 +110,7 @@ func run() error {
 				return
 			}
 			cutoff := time.Now().AddDate(0, 0, -cfg.RetentionDays)
-			if err := st.DeleteOlderThan(ctx, cutoff); err != nil {
+			if err := st.DeleteOlderThan(ctx, cutoff); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("retention delete failed", "err", err)
 			}
 
@@ -136,21 +130,118 @@ func run() error {
 		close(serverErr)
 	}()
 
+	var serveErr error
 	select {
 	case <-ctx.Done():
-		slog.Info("notinv shutting down")
 	case err := <-serverErr:
-		wg.Wait()
-		writer.Close()
-		return errors.Join(fmt.Errorf("serve: %w", err), st.Close())
+		if err != nil {
+			serveErr = fmt.Errorf("serve: %w", err)
+		}
+		// Stop scheduling and retention even when startup, not a signal, fails.
+		stop()
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownErr := orchestrateShutdown(defaultShutdownBudget(), drainDone, cancelRuns,
+		srv.Shutdown, func() error {
+			wg.Wait()
+			writer.Close()
+			return st.Close()
+		}, logger)
+	return errors.Join(serveErr, shutdownErr)
+}
+
+func newLogger(w io.Writer, level, format string) *slog.Logger {
+	logLevel := slog.LevelInfo
+	switch level {
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "warn":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	}
+	opts := &slog.HandlerOptions{Level: logLevel}
+	if format == "json" {
+		return slog.New(slog.NewJSONHandler(w, opts))
+	}
+	return slog.New(slog.NewTextHandler(w, opts))
+}
+
+type shutdownBudget struct {
+	overall time.Duration
+	drain   time.Duration
+}
+
+func defaultShutdownBudget() shutdownBudget {
+	return shutdownBudget{overall: 8 * time.Second, drain: 5 * time.Second}
+}
+
+func (b shutdownBudget) httpShutdown(elapsed time.Duration) time.Duration {
+	return max(0, b.overall-elapsed)
+}
+
+// The scheduler stops on the signal, but an active script and its final result
+// write retain their own context until the drain resolves.
+type drainingScript struct {
+	runner.Script
+	ctx context.Context
+}
+
+func (s drainingScript) Run(_ context.Context, services *runner.Context) error {
+	return s.Script.Run(s.ctx, services)
+}
+
+type drainingStore struct {
+	runner.RunStore
+	ctx context.Context
+}
+
+func (s drainingStore) InsertRun(_ context.Context, run store.Run) error {
+	return s.RunStore.InsertRun(s.ctx, run)
+}
+
+func startRunners(ctx context.Context, scripts []runner.Script, services *runner.Context, st runner.RunStore) (context.CancelFunc, <-chan struct{}) {
+	runCtx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	for _, script := range scripts {
+		wg.Add(1)
+		go func(s runner.Script) {
+			defer wg.Done()
+			if err := runner.Run(ctx, drainingScript{Script: s, ctx: runCtx}, services,
+				drainingStore{RunStore: st, ctx: runCtx}); err != nil {
+				services.Log.Error("runner exited", "script", s.Name(), "err", err)
+			}
+		}(script)
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	return cancel, done
+}
+
+// HTTP gets only the time left after draining, not a fresh independent budget.
+// Errors are returned for the caller to log once; ErrServerClosed is normal.
+func orchestrateShutdown(budget shutdownBudget, drainDone <-chan struct{}, cancelRuns context.CancelFunc,
+	httpShutdown func(context.Context) error, dbClose func() error, logger *slog.Logger,
+) error {
+	started := time.Now()
+	logger.Info("notinv shutting down")
+	timer := time.NewTimer(min(budget.drain, budget.overall))
+	defer timer.Stop()
+	select {
+	case <-drainDone:
+	case <-timer.C:
+	}
+	cancelRuns()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), budget.httpShutdown(time.Since(started)))
 	defer cancel()
-	srvErr := srv.Shutdown(shutdownCtx)
-	wg.Wait()
-	writer.Close()
-	return errors.Join(srvErr, st.Close())
+	httpErr := httpShutdown(shutdownCtx)
+	if errors.Is(httpErr, http.ErrServerClosed) {
+		httpErr = nil
+	}
+	return errors.Join(httpErr, dbClose())
 }
 
 func newMux(st *store.Store, schedules map[string]string) *http.ServeMux {
