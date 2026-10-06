@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>notinv · Monitoring</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root { color-scheme: light dark; --page: #f3f5f9; --text: #182439; --muted: #53627a; --card: #fff; --chart: #f8fafc; --border: #cbd5e1; --accent: #245bcc; --error: #b42342; }
+    @media (prefers-color-scheme: dark) {
+      :root { --page: #0c1320; --text: #e5edf9; --muted: #a5b5ce; --card: #162135; --chart: #101a2b; --border: #34445e; --accent: #93b5ff; --error: #ff8ba6; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--page); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
+    main { max-width: 1440px; margin: auto; padding: 32px 24px; }
+    header, .card-heading, .chart-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 28px; letter-spacing: -.04em; }
+    h2 { font-size: 20px; overflow-wrap: anywhere; }
+    h3 { font-size: 15px; }
+    .muted, dt { color: var(--muted); }
+    #status { margin: 20px 0; min-height: 24px; }
+    #cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 540px), 1fr)); gap: 24px; }
+    .card { min-width: 0; background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
+    .badge { border: 1px solid var(--border); border-radius: 24px; padding: 4px 12px; font-size: 13px; }
+    .error { color: var(--error); }
+    dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin: 24px 0; }
+    dt { font-size: 12px; }
+    dd { margin: 3px 0 0; font-weight: 600; overflow-wrap: anywhere; }
+    button, select { font: inherit; background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; }
+    button { cursor: pointer; }
+    button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .chart-surface { position: relative; height: 260px; background: var(--chart); border-radius: 8px; margin-top: 16px; padding: 8px; }
+    .chart-status, .legend { margin-top: 10px; font-size: 12px; color: var(--muted); }
+    .legend { display: flex; flex-wrap: wrap; gap: 12px; }
+    .legend span::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--dot); margin-right: 5px; }
+    .run-error { margin-top: 12px; overflow-wrap: anywhere; }
+    @media (max-width: 600px) { main { padding: 20px 12px; } .card { padding: 18px; } }
+  </style>
+  <script src="/vendor/chart.umd.min.js"></script>
+  <script src="/vendor/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>notinv</h1><p class="muted">Checks, at a glance · live monitoring</p></div>
+      <button id="refresh" type="button">Refresh now</button>
+    </header>
+    <p id="status" role="status" aria-live="polite">Loading scripts…</p>
+    <section id="cards" aria-label="Monitored scripts"></section>
+    <noscript>Enable JavaScript to load monitoring data and charts.</noscript>
+  </main>
+  <template id="card-template">
+    <article class="card">
+      <div class="card-heading"><h2></h2><span class="badge"></span></div>
+      <p class="run-error error" hidden></p>
+      <dl>
+        <div><dt>Schedule</dt><dd data-field="schedule"></dd></div>
+        <div><dt>Last run</dt><dd data-field="lastRun"></dd></div>
+        <div><dt>Latest run · OK / failing</dt><dd data-field="counts"></dd></div>
+        <div><dt>Uptime · last 7 days</dt><dd data-field="uptime"></dd></div>
+        <div><dt>Average latency · last 7 days</dt><dd data-field="average"></dd></div>
+        <div><dt>p95 latency · last 7 days</dt><dd data-field="p95"></dd></div>
+      </dl>
+      <div class="chart-heading">
+        <h3>Request latency</h3>
+        <label>Range <select aria-label="Chart time range"><option value="3600000">1h</option><option value="86400000" selected>24h</option><option value="604800000">7d</option></select></label>
+      </div>
+      <div class="chart-surface"><canvas role="img" aria-label="Request latency over time"></canvas></div>
+      <p class="chart-status" role="status"></p>
+      <div class="legend" aria-label="Point status colors">
+        <span style="--dot:#22a579">2xx</span><span style="--dot:#6099f8">3xx</span><span style="--dot:#ef795f">4xx failure</span><span style="--dot:#e34c75">5xx failure</span><span style="--dot:#c26bf3">Request error</span>
+      </div>
+    </article>
+  </template>
+  <script>
+    'use strict';
+    const cards = new Map();
+    const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
+    const status = document.getElementById('status');
+    let refreshing = false;
+
+    function pointColor(point) {
+      if (point.error !== null || point.status < 100 || point.status >= 600) return '#c26bf3';
+      switch (Math.floor(point.status / 100)) {
+        case 2: return '#22a579';
+        case 3: return '#6099f8';
+        case 4: return '#ef795f';
+        case 5: return '#e34c75';
+        default: return '#94a3b8';
+      }
+    }
+
+    function datasetsFor(points) {
+      const groups = new Map();
+      for (const point of points) {
+        if (!groups.has(point.url)) groups.set(point.url, []);
+        groups.get(point.url).push(point);
+      }
+      return Array.from(groups, ([url, rows], index) => ({
+        label: url,
+        data: rows.map(point => ({ x: point.time, y: point.latency })),
+        borderColor: `hsl(${(index * 137.5 + 210) % 360}, 65%, 60%)`,
+        pointBackgroundColor: rows.map(pointColor),
+        pointBorderColor: rows.map(pointColor),
+        pointRadius: 3,
+        borderWidth: 2,
+        tension: 0.15
+      }));
+    }
+
+    function applyChartTheme(chart) {
+      const text = darkMode.matches ? '#a5b5ce' : '#53627a';
+      const grid = darkMode.matches ? '#34445e' : '#cbd5e1';
+      chart.options.plugins.legend.labels.color = text;
+      for (const axis of ['x', 'y']) {
+        chart.options.scales[axis].ticks.color = text;
+        chart.options.scales[axis].title.color = text;
+        chart.options.scales[axis].grid.color = grid;
+      }
+    }
+
+    async function fetchJSON(path, signal) {
+      const response = await fetch(path, { signal, cache: 'no-store' });
+      if (!response.ok) throw new Error(`Request failed (${response.status})`);
+      return response.json();
+    }
+
+    async function refreshSeries(card) {
+      card.controller?.abort();
+      const controller = new AbortController();
+      card.controller = controller;
+      const spanMs = Number(card.range.value);
+      const since = new Date(Date.now() - spanMs).toISOString();
+      card.message.textContent = 'Loading requests…';
+      try {
+        const points = await fetchJSON('/api/scripts/' + encodeURIComponent(card.name) + '/requests/series?since=' + encodeURIComponent(since), controller.signal);
+        if (controller.signal.aborted) return;
+        card.chart.data.datasets = datasetsFor(points);
+        card.chart.options.scales.x.min = since;
+        card.chart.options.scales.x.max = new Date().toISOString();
+        card.chart.update();
+        card.message.textContent = points.length ? `${points.length} requests in this window` : 'No requests in this window.';
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        card.message.textContent = `${error.message}. Chart may be stale; retry with the range picker or refresh.`;
+      }
+    }
+
+    function createCard(name) {
+      const element = document.getElementById('card-template').content.firstElementChild.cloneNode(true);
+      document.getElementById('cards').append(element);
+      element.querySelector('h2').textContent = name;
+      const canvas = element.querySelector('canvas');
+      canvas.setAttribute('aria-label', `Request latency over time for ${name}`);
+      const chart = new Chart(canvas, {
+        type: 'line', data: { datasets: [] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: { legend: { labels: { color: '#53627a', boxWidth: 12 } } },
+          scales: {
+            x: { type: 'time', title: { display: true, text: 'Time' }, ticks: {}, grid: {} },
+            y: { beginAtZero: true, title: { display: true, text: 'Latency (ms)' }, ticks: {}, grid: {} }
+          }
+        }
+      });
+      applyChartTheme(chart);
+      const card = { name, element, chart, range: element.querySelector('select'), message: element.querySelector('.chart-status') };
+      card.range.addEventListener('change', () => refreshSeries(card));
+      return card;
+    }
+
+    function updateCard(card, script) {
+      const fields = {
+        schedule: script.schedule || 'Not scheduled',
+        lastRun: script.latest ? new Date(script.latest.time).toLocaleString() : 'Never run',
+        counts: script.latest ? (script.latest.ok ? '1 OK / 0 failing' : '0 OK / 1 failing') : '0 OK / 0 failing',
+        uptime: `${(script.uptime * 100).toFixed(1)}%`,
+        average: `${script.avgLatency.toFixed(1)} ms`,
+        p95: `${script.p95Latency.toFixed(1)} ms`
+      };
+      for (const [field, value] of Object.entries(fields)) card.element.querySelector(`[data-field="${field}"]`).textContent = value;
+      const badge = card.element.querySelector('.badge');
+      badge.textContent = script.latest ? (script.latest.ok ? 'OK' : 'Failing') : 'No runs yet';
+      badge.classList.toggle('error', Boolean(script.latest && !script.latest.ok));
+      const error = card.element.querySelector('.run-error');
+      error.textContent = script.latest?.error || '';
+      error.hidden = !error.textContent;
+    }
+
+    async function refreshDashboard() {
+      if (refreshing) return;
+      refreshing = true;
+      status.textContent = 'Refreshing…';
+      try {
+        const scripts = await fetchJSON('/api/scripts', AbortSignal.timeout(20000));
+        const activeNames = new Set(scripts.map(script => script.name));
+        for (const [name, card] of cards) {
+          if (!activeNames.has(name)) {
+            card.controller?.abort();
+            card.chart.destroy();
+            card.element.remove();
+            cards.delete(name);
+          }
+        }
+        for (const script of scripts) {
+          if (!cards.has(script.name)) cards.set(script.name, createCard(script.name));
+          updateCard(cards.get(script.name), script);
+        }
+        status.textContent = scripts.length ? `${scripts.length} scripts · Updated ${new Date().toLocaleTimeString()} · Refreshes every 30s` : 'No scripts recorded yet. Checks will appear after they run.';
+      } catch (error) {
+        status.textContent = `${error.message}. Summary may be stale; retrying automatically.`;
+      } finally {
+        refreshing = false;
+        // Refresh existing charts even when the summary endpoint is unavailable.
+        for (const card of cards.values()) void refreshSeries(card);
+      }
+    }
+
+    darkMode.addEventListener('change', () => {
+      for (const card of cards.values()) {
+        applyChartTheme(card.chart);
+        card.chart.update();
+      }
+    });
+    document.getElementById('refresh').addEventListener('click', refreshDashboard);
+    void refreshDashboard();
+    setInterval(refreshDashboard, 30000);
+  </script>
+</body>
+</html>
