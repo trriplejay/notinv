@@ -21,6 +21,7 @@ import (
 	"github.com/trriplejay/notinv/internal/rc"
 	"github.com/trriplejay/notinv/internal/runner"
 	"github.com/trriplejay/notinv/internal/store"
+	"github.com/trriplejay/notinv/internal/web"
 	"github.com/trriplejay/notinv/scripts/example"
 )
 
@@ -62,11 +63,11 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	db, err := store.Open(ctx, cfg.DatabaseURL, cfg.DatabaseAuthToken)
+	st, err := store.Open(ctx, cfg.DatabaseURL, cfg.DatabaseAuthToken)
 	if err != nil {
-		return fmt.Errorf("open recording store: %w", err)
+		return fmt.Errorf("open store: %w", err)
 	}
-	writer := rc.NewWriter(db, version, slog.Default(), rc.Options{})
+	writer := rc.NewWriter(st, version, slog.Default(), rc.Options{})
 
 	logger := slog.Default()
 	httpClient := &http.Client{Timeout: 30 * time.Second}
@@ -78,23 +79,49 @@ func run() error {
 		wg.Add(1)
 		go func(s runner.Script) {
 			defer wg.Done()
-			if err := runner.Run(ctx, s, runCtx, db); err != nil {
+			if err := runner.Run(ctx, s, runCtx, st); err != nil {
 				slog.Error("runner exited", "script", s.Name(), "err", err)
 			}
 		}(script)
 	}
 
+	mux := http.NewServeMux()
+	mux.Handle("GET /api/scripts", web.NewScriptsHandler(st, nil))
+	mux.Handle("GET /api/scripts/{name}/runs", web.NewRunsHandler(st, nil))
+	mux.Handle("GET /api/scripts/{name}/requests", web.NewRequestsHandler(st, nil))
+	mux.Handle("GET /healthz", web.NewHealthHandler(st))
+
+	srv := &http.Server{
+		Addr:              cfg.Listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
 	slog.Info("notinv starting", "version", version)
 
-	<-ctx.Done()
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+		close(serverErr)
+	}()
 
-	slog.Info("notinv shutting down")
+	select {
+	case <-ctx.Done():
+		slog.Info("notinv shutting down")
+	case err := <-serverErr:
+		wg.Wait()
+		writer.Close()
+		return errors.Join(fmt.Errorf("serve: %w", err), st.Close())
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	srvErr := srv.Shutdown(shutdownCtx)
 	wg.Wait()
 	writer.Close()
-	if err := db.Close(); err != nil {
-		return fmt.Errorf("close recording store: %w", err)
-	}
-	return nil
+	return errors.Join(srvErr, st.Close())
 }
 
 func loadEnvFile(path string, explicit bool) error {
