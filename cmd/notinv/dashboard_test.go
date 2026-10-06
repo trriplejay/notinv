@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -51,5 +52,33 @@ func TestDashboardEmbeddedAndAPIRoutes(t *testing.T) {
 				t.Fatalf("%s: status=%d type=%s body=%.120s", tc.path, resp.StatusCode, resp.Header.Get("Content-Type"), body)
 			}
 		})
+	}
+}
+
+func TestDashboardScriptsSchedule(t *testing.T) {
+	t.Chdir(t.TempDir())
+	st, err := store.Open(context.Background(), "file:test.db", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.InsertRun(context.Background(), store.Run{Script: "example"}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	newMux(st, map[string]string{"example": "@hourly"}).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/scripts", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/scripts: status=%d body=%s", w.Code, w.Body.String())
+	}
+	var scripts []struct {
+		Name     string `json:"name"`
+		Schedule string `json:"schedule"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &scripts); err != nil {
+		t.Fatal(err)
+	}
+	if len(scripts) != 1 || scripts[0].Name != "example" || scripts[0].Schedule != "@hourly" {
+		t.Fatalf("GET /api/scripts: scripts=%+v; want example with schedule @hourly", scripts)
 	}
 }
