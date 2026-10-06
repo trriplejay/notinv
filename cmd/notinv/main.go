@@ -25,6 +25,8 @@ import (
 	"github.com/trriplejay/notinv/scripts/example"
 )
 
+const retentionInterval = 24 * time.Hour
+
 // version is overridden at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
@@ -98,6 +100,31 @@ func run() error {
 	}
 
 	slog.Info("notinv starting", "version", version)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(retentionInterval)
+		defer ticker.Stop()
+
+		for {
+			// Sweep at startup and after each tick. Recheck cancellation because
+			// select may choose a ready tick even when ctx.Done is also ready.
+			if ctx.Err() != nil {
+				return
+			}
+			cutoff := time.Now().AddDate(0, 0, -cfg.RetentionDays)
+			if err := st.DeleteOlderThan(ctx, cutoff); err != nil {
+				slog.Error("retention delete failed", "err", err)
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 
 	serverErr := make(chan error, 1)
 	go func() {
