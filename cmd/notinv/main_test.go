@@ -21,7 +21,18 @@ import (
 	"github.com/trriplejay/notinv/internal/config"
 	"github.com/trriplejay/notinv/internal/runner"
 	"github.com/trriplejay/notinv/internal/store"
+	"github.com/trriplejay/notinv/scripts/nintendo"
 )
+
+// TestDefaultScriptsRegistersNintendo checks the same slice used by run.
+func TestDefaultScriptsRegistersNintendo(t *testing.T) {
+	for _, script := range defaultScripts() {
+		if _, ok := script.(*nintendo.Script); ok {
+			return
+		}
+	}
+	t.Fatal("production scripts do not include the Nintendo check")
+}
 
 // CLM-11: an absent implicit .env must not change the environment.
 func TestLoadEnvFileDefaultMissing(t *testing.T) {
