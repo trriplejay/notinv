@@ -1,3 +1,6 @@
+// Command healthcheck probes the notinv service's /healthz endpoint on the
+// container-local loopback, for use as the Dockerfile HEALTHCHECK. It exits 0
+// when /healthz returns 200 and non-zero otherwise.
 package main
 
 import (
@@ -32,11 +35,11 @@ func main() {
 	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := client.Get(url) //nolint:gosec // G704 false positive: targetURL always targets the 127.0.0.1 loopback (only the port derives from NOTINV_LISTEN), so this is a container-local healthcheck probe, not an SSRF vector
 	if err != nil {
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		os.Exit(1)
