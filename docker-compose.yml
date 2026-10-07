@@ -1,0 +1,14 @@
+services:
+  notinv:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8080:8080"
+    # Only for a local file: DATABASE_URL (default file:./data/notinv.db):
+    # create ./data on the host with write permission for the container's nonroot user,
+    # then uncomment this mount. Remote libsql:/Turso stores data remotely and needs no volume.
+    # volumes:
+    #   - ./data:/app/data
