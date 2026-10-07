@@ -24,8 +24,14 @@ jobs:
           fi
       - name: go vet
         run: go vet ./...
+      - name: go build
+        env:
+          CGO_ENABLED: 1
+        run: go build ./cmd/notinv
       - name: go test
-        run: go test ./...
+        env:
+          CGO_ENABLED: 1
+        run: go test -race ./...
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
