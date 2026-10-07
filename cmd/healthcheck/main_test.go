@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
 
 // CLM-3: the Dockerfile HEALTHCHECK probes /healthz on the listen port, so
 // targetURL must correctly derive that probe URL from NOTINV_LISTEN — if the
@@ -34,4 +39,42 @@ func TestTargetURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProbe(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		status  int
+		wantErr bool
+	}{
+		{name: "200 healthy", status: http.StatusOK},
+		{name: "503 unhealthy", status: http.StatusServiceUnavailable, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/healthz" {
+					t.Errorf("request path = %q, want /healthz", r.URL.Path)
+				}
+				w.WriteHeader(tt.status)
+			}))
+			defer server.Close()
+
+			err := probe(server.URL+"/healthz", time.Second)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("probe() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+
+	t.Run("unreachable server", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		url := server.URL + "/healthz"
+		server.Close()
+
+		if err := probe(url, time.Second); err == nil {
+			t.Error("probe() on closed server returned nil, want connection error")
+		}
+	})
 }
