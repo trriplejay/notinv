@@ -1,6 +1,10 @@
 # Build output
 /bin/
 
+# Local Go build cache and tool state
+.gocache-tmp/
+.home-tmp/
+
 # Local data and secrets
 *.db
 *.db-shm
