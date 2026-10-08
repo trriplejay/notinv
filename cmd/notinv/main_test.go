@@ -23,6 +23,16 @@ import (
 	"github.com/trriplejay/notinv/internal/store"
 )
 
+// CLM-1: the production script list includes the Nintendo inventory check.
+func TestDefaultScripts(t *testing.T) {
+	for _, script := range defaultScripts() {
+		if script.Name() == "nintendo" {
+			return
+		}
+	}
+	t.Fatal("default scripts do not include nintendo")
+}
+
 // CLM-11: an absent implicit .env must not change the environment.
 func TestLoadEnvFileDefaultMissing(t *testing.T) {
 	t.Chdir(t.TempDir())
