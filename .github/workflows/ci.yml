@@ -14,25 +14,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-      - name: gofmt
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "The following files are not gofmt-formatted:"
-            echo "$unformatted"
-            exit 1
-          fi
-      - name: go vet
-        run: go vet ./...
-      - name: go build
-        env:
-          CGO_ENABLED: 1
-        run: go build ./cmd/notinv
-      - name: go test
-        env:
-          CGO_ENABLED: 1
-        run: go test -race ./...
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
           version: v2.14.0
+      - name: make build
+        env:
+          CGO_ENABLED: 1
+        run: make build
+      - name: make ci
+        env:
+          CGO_ENABLED: 1
+        run: make ci
