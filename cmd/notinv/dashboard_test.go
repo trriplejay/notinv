@@ -28,6 +28,8 @@ func TestDashboardEmbeddedAndAPIRoutes(t *testing.T) {
 		status                  int
 	}{
 		{"/", "text/html", "<title>notinv", http.StatusOK},
+		{"/script.html", "text/html", "<title>notinv · Script details</title>", http.StatusOK},
+		{"/script.html?name=checkout%20%26%20inventory%2F%3F%23%25%2B", "text/html", "<title>notinv · Script details</title>", http.StatusOK},
 		{"/vendor/chart.umd.min.js", "javascript", "Chart.js v4.5.1", http.StatusOK},
 		{"/vendor/chartjs-adapter-date-fns.bundle.min.js", "javascript", "chartjs-adapter-date-fns v3.0.0", http.StatusOK},
 		{"/missing.html", "text/plain", "404", http.StatusNotFound},
