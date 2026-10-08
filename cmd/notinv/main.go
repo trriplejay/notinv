@@ -24,6 +24,7 @@ import (
 	"github.com/trriplejay/notinv/internal/store"
 	"github.com/trriplejay/notinv/internal/web"
 	"github.com/trriplejay/notinv/scripts/example"
+	"github.com/trriplejay/notinv/scripts/nintendo"
 	webassets "github.com/trriplejay/notinv/web"
 )
 
@@ -77,7 +78,7 @@ func run() error {
 
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	services := runner.NewContext(logger, httpClient, cfg)
-	scripts := []runner.Script{example.New()}
+	scripts := defaultScripts()
 	cancelRuns, drainDone := startRunners(ctx, scripts, services, st)
 	defer cancelRuns()
 
@@ -148,6 +149,11 @@ func run() error {
 			return st.Close()
 		}, logger)
 	return errors.Join(serveErr, shutdownErr)
+}
+
+// defaultScripts returns fresh instances of the scripts scheduled by the service.
+func defaultScripts() []runner.Script {
+	return []runner.Script{example.New(), nintendo.New()}
 }
 
 func newLogger(w io.Writer, level, format string) *slog.Logger {
