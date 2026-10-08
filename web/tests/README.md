@@ -29,6 +29,13 @@ The host-network example targets Linux. With locally installed Playwright Chromi
 `npm --prefix web/tests test` also works. `NOTINV_BROWSER_URL` overrides the default
 `http://127.0.0.1:18080` test origin.
 
+The per-script page scenarios are in `script-page.test.cjs`. With the same assembly
+running, invoke them separately with `node --test script-page.test.cjs` from
+`web/tests` (or replace `npm test` in the Playwright container command above).
+They cover linked slim cards, detail fields, chart ranges, direct navigation,
+missing names, and failure messages. The older `dashboard.test.cjs` still expects
+full-detail landing cards and is not the gate for the slim-card layout.
+
 Tests cover live DTO cards (including null latest and untrusted text), time-axis
 URL grouping, status/error colors, all range windows through the RFC3339 parser,
 auto-refresh with a virtual browser clock, dynamic dark mode, no external requests,
