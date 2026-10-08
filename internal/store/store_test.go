@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -105,6 +106,31 @@ func TestDeleteOlderThanCanceled(t *testing.T) {
 	cancel()
 	if err := s.DeleteOlderThan(ctx, time.UnixMilli(0)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected wrapped cancellation, got %v", err)
+	}
+}
+
+// Script runs and the retention sweep write concurrently; a local file store
+// must serialize them rather than fail with "database is locked".
+func TestLocalConcurrentWrites(t *testing.T) {
+	s, _ := openTestStore(t)
+	ctx := t.Context()
+	for i := range 20 {
+		var wg sync.WaitGroup
+		errs := make([]error, 4)
+		wg.Add(len(errs))
+		go func() { defer wg.Done(); errs[0] = s.DeleteOlderThan(ctx, time.Now().AddDate(0, 0, -30)) }()
+		go func() { defer wg.Done(); errs[1] = s.InsertRun(ctx, Run{Script: "a", StartedAt: time.Now(), OK: true}) }()
+		go func() {
+			defer wg.Done()
+			errs[2] = s.InsertRequests(ctx, []Request{{Script: "b", StartedAt: time.Now()}, {Script: "b", StartedAt: time.Now()}})
+		}()
+		go func() { defer wg.Done(); _, errs[3] = s.ListScripts(ctx) }()
+		wg.Wait()
+		for op, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d, op %d: %v", i, op, errors.Unwrap(errors.Unwrap(err)))
+			}
+		}
 	}
 }
 

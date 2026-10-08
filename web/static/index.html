@@ -192,7 +192,7 @@
       <p class="run-error error" hidden></p>
       <dl class="metrics">
         <div><dt>Last run</dt><dd data-field="lastRun"></dd><span class="sub" data-relative></span></div>
-        <div><dt title="Latest run · OK / failing">Latest run</dt><dd data-field="counts"></dd></div>
+        <div><dt title="Runs · last 7 days · OK / failing">Runs · 7d</dt><dd data-field="counts"></dd></div>
         <div><dt title="Uptime · last 7 days">Uptime · 7d</dt><dd data-field="uptime"></dd><div class="meter" aria-hidden="true"><span></span></div></div>
         <div><dt title="Average latency · last 7 days">Avg latency · 7d</dt><dd data-field="average"></dd></div>
         <div><dt title="p95 latency · last 7 days">p95 latency · 7d</dt><dd data-field="p95"></dd></div>
@@ -378,7 +378,7 @@
       const fields = {
         schedule: script.schedule || 'Not scheduled',
         lastRun: script.latest ? new Date(script.latest.time).toLocaleString() : 'Never run',
-        counts: script.latest ? (script.latest.ok ? '1 OK / 0 failing' : '0 OK / 1 failing') : '0 OK / 0 failing',
+        counts: `${script.okRuns} OK / ${script.failedRuns} failing`,
         uptime: `${(script.uptime * 100).toFixed(1)}%`,
         average: `${script.avgLatency.toFixed(1)} ms`,
         p95: `${script.p95Latency.toFixed(1)} ms`

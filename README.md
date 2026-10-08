@@ -154,9 +154,9 @@ var _ runner.Script = (*Script)(nil)
 
 Give `Name()` a unique, stable identifier (`"widget"`). `Schedule()` accepts a
 five-field cron expression or `@every <duration>`; the template uses `"@every 5m"`.
-For a quicker first-DM check you can change it to `"@every 10s"`, then restore your
-preferred interval afterward. A run waits for its scheduled time; it does not
-execute immediately at startup.
+Each script runs once immediately at startup, then on its schedule. For quicker
+follow-up checks while testing DMs you can change it to `"@every 10s"`, then
+restore your preferred interval afterward.
 
 ### Implement the check and notification policy
 
@@ -274,11 +274,12 @@ module caches are kept in named volumes so rebuilds stay fast; remove them with
 
 1. Make the endpoint in `WIDGET_STOCK_URL` return HTTP 200, then start notinv using
    one of the paths above. Ensure both Discord credentials are set (not dry-run).
-2. Wait for the first scheduled check: five minutes with the template schedule,
-   or about ten seconds if you selected `@every 10s`. Confirm a successful run
-   in the dashboard or logs. **No DM on this first baseline run is expected.**
+2. The first check runs right away at startup. Confirm a successful run in the
+   dashboard or logs. **No DM on this first baseline run is expected.**
 3. Without restarting notinv, change that same endpoint to return a non-200
-   status, such as HTTP 503, and leave it that way until the next check. The
+   status, such as HTTP 503, and leave it that way until the next scheduled
+   check (five minutes with the template schedule, or about ten seconds with
+   `@every 10s`). The
    copied script detects healthy → unhealthy and calls `rc.Notify`, sending
    `widget state changed: ok=false` to your configured Discord user.
 4. Restore HTTP 200 and wait for another check to receive

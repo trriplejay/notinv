@@ -47,6 +47,8 @@ type scriptDTO struct {
 	Schedule   string     `json:"schedule"`
 	AvgLatency float64    `json:"avgLatency"`
 	P95Latency float64    `json:"p95Latency"`
+	OKRuns     int        `json:"okRuns"`
+	FailedRuns int        `json:"failedRuns"`
 }
 
 type runDTO struct {
@@ -71,8 +73,8 @@ type seriesDTO struct {
 	Error   *string `json:"error"`
 }
 
-// NewScriptsHandler serves GET /api/scripts. Uptime and request latencies cover
-// the last seven days. Schedules are keyed by script name. A nil now uses time.Now.
+// NewScriptsHandler serves GET /api/scripts. Uptime, run counts, and request
+// latencies cover the last seven days. Schedules are keyed by script name. A nil now uses time.Now.
 func NewScriptsHandler(db ScriptLister, schedules map[string]string, now func() time.Time) http.Handler {
 	now = clock(now)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -83,6 +85,8 @@ func NewScriptsHandler(db ScriptLister, schedules map[string]string, now func() 
 			http.Error(w, "cannot list scripts", http.StatusInternalServerError)
 			return
 		}
+		// Registered scripts appear before their first recorded run.
+		names = mergeNames(names, schedules)
 		out := make([]scriptDTO, 0, len(names))
 		for _, name := range names {
 			latest, err := db.LatestRun(r.Context(), name)
@@ -116,14 +120,14 @@ func NewScriptsHandler(db ScriptLister, schedules map[string]string, now func() 
 			if latest != nil {
 				item.Latest = &latestDTO{Time: latest.StartedAt.Format(time.RFC3339), OK: latest.OK, Error: latest.Err}
 			}
-			ok := 0
 			for _, run := range runs {
 				if run.OK {
-					ok++
+					item.OKRuns++
 				}
 			}
+			item.FailedRuns = len(runs) - item.OKRuns
 			if len(runs) > 0 {
-				item.Uptime = float64(ok) / float64(len(runs))
+				item.Uptime = float64(item.OKRuns) / float64(len(runs))
 			}
 			out = append(out, item)
 		}
@@ -241,6 +245,26 @@ func clock(now func() time.Time) func() time.Time {
 		return time.Now
 	}
 	return now
+}
+
+// mergeNames returns the sorted, distinct union of recorded and registered names.
+func mergeNames(recorded []string, schedules map[string]string) []string {
+	seen := make(map[string]bool, len(recorded)+len(schedules))
+	names := make([]string, 0, len(recorded)+len(schedules))
+	for _, name := range recorded {
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	for name := range schedules {
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func windowStart(r *http.Request, until time.Time) (time.Time, error) {
