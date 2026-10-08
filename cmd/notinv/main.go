@@ -76,10 +76,8 @@ func run() error {
 	}
 	writer := rc.NewWriter(st, version, logger, rc.Options{})
 
-	httpClient := &http.Client{Timeout: 30 * time.Second}
-	services := runner.NewContext(logger, httpClient, cfg)
 	scripts := defaultScripts()
-	cancelRuns, drainDone := startRunners(ctx, scripts, services, st)
+	cancelRuns, drainDone := startRunners(ctx, scripts, newServicesFor(logger, cfg, writer), st)
 	defer cancelRuns()
 
 	schedules := make(map[string]string, len(scripts))
@@ -206,13 +204,14 @@ func (s drainingStore) InsertRun(_ context.Context, run store.Run) error {
 	return s.RunStore.InsertRun(s.ctx, run)
 }
 
-func startRunners(ctx context.Context, scripts []runner.Script, services *runner.Context, st runner.RunStore) (context.CancelFunc, <-chan struct{}) {
+func startRunners(ctx context.Context, scripts []runner.Script, servicesFor func(runner.Script) *runner.Context, st runner.RunStore) (context.CancelFunc, <-chan struct{}) {
 	runCtx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	for _, script := range scripts {
 		wg.Add(1)
 		go func(s runner.Script) {
 			defer wg.Done()
+			services := servicesFor(s)
 			if err := runner.Run(ctx, drainingScript{Script: s, ctx: runCtx}, services,
 				drainingStore{RunStore: st, ctx: runCtx}); err != nil {
 				services.Log.Error("runner exited", "script", s.Name(), "err", err)
@@ -225,6 +224,18 @@ func startRunners(ctx context.Context, scripts []runner.Script, services *runner
 		close(done)
 	}()
 	return cancel, done
+}
+
+// newServicesFor builds each script's services. Discord notifications use a
+// plain client; the script's own requests go through a recording client so
+// they appear in the dashboard.
+func newServicesFor(logger *slog.Logger, cfg *config.Config, writer *rc.Writer) func(runner.Script) *runner.Context {
+	notifyHTTP := &http.Client{Timeout: 30 * time.Second}
+	return func(s runner.Script) *runner.Context {
+		services := runner.NewContext(logger, notifyHTTP, cfg)
+		services.HTTP = rc.New(s.Name(), writer)
+		return services
+	}
 }
 
 // HTTP gets only the time left after draining, not a fresh independent budget.

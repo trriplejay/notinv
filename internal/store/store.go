@@ -54,6 +54,14 @@ func Open(ctx context.Context, databaseURL, authToken string) (*Store, error) {
 		return nil, databaseError("open", scheme, err)
 	}
 	s := &Store{db: db, remote: scheme == "libsql"}
+	if !s.remote {
+		// SQLite allows one writer at a time, and the driver does not wait on a
+		// held lock, so concurrent writers (script runs and the retention
+		// sweep) fail with "database is locked". A single connection serializes
+		// access in-process instead. No store method nests queries, so this
+		// cannot deadlock.
+		db.SetMaxOpenConns(1)
+	}
 	if err := db.PingContext(ctx); err != nil {
 		return nil, databaseError("ping", scheme, errors.Join(err, db.Close()))
 	}

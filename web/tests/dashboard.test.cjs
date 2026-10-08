@@ -46,7 +46,7 @@ test('dashboard with embedded assets, real Go API and SQLite', async t => {
     const scripts = await (await page.request.get(`${baseURL}/api/scripts`)).json();
     assert.equal(await page.locator(cardSelector).count(), scripts.length);
     assert.equal(await card.locator('[data-field=schedule]').textContent(), '*/5 * * * *');
-    assert.equal(await card.locator('[data-field=counts]').textContent(), '1 OK / 0 failing');
+    assert.equal(await card.locator('[data-field=counts]').textContent(), '1 OK / 1 failing');
     assert.equal(await card.locator('[data-field=uptime]').textContent(), '50.0%');
     assert.equal(await card.locator('[data-field=average]').textContent(), '45.0 ms');
     assert.equal(await card.locator('[data-field=p95]').textContent(), '80.0 ms');
@@ -154,11 +154,13 @@ test('dashboard with embedded assets, real Go API and SQLite', async t => {
     changed.latest.ok = false;
     changed.latest.error = '<b>failure</b>';
     changed.uptime = 0.995;
+    changed.okRuns = 199;
+    changed.failedRuns = 1;
     await page.route('**/api/scripts', route => route.fulfill({ json: scripts }));
     await page.route('**/requests/series?*', route => route.fulfill({ json: [] }));
     await page.getByRole('button', { name: 'Refresh now' }).click();
     await page.waitForFunction(() => [...document.querySelectorAll('.chart-status')].every(e => e.textContent === 'No requests in this window.'));
-    assert.equal(await card.locator('[data-field=counts]').textContent(), '0 OK / 1 failing');
+    assert.equal(await card.locator('[data-field=counts]').textContent(), '199 OK / 1 failing');
     assert.equal(await card.locator('[data-field=uptime]').textContent(), '99.5%');
     assert.equal(await card.locator('.run-error').textContent(), '<b>failure</b>');
     assert.equal(await card.locator('.run-error b').count(), 0);

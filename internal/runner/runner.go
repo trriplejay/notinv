@@ -55,6 +55,8 @@ type RunStore interface {
 }
 
 // Run schedules one script, executing and recording its runs sequentially.
+// The first run starts immediately so results are available right after
+// startup; later runs follow the schedule, computed after each run finishes.
 // Cancellation stops the wait promptly; an active script must honor ctx itself.
 // The caller must supply a non-nil logger in rc.
 func Run(ctx context.Context, script Script, rc *Context, store RunStore) error {
@@ -65,14 +67,16 @@ func Run(ctx context.Context, script Script, rc *Context, store RunStore) error 
 		return err
 	}
 
-	for {
-		next := sched.Next(time.Now())
-		timer := time.NewTimer(time.Until(next))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil
-		case <-timer.C:
+	for first := true; ; first = false {
+		if !first {
+			next := sched.Next(time.Now())
+			timer := time.NewTimer(time.Until(next))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+			}
 		}
 		// Prefer shutdown if the timer and cancellation became ready together.
 		if ctx.Err() != nil {

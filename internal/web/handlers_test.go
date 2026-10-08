@@ -171,8 +171,8 @@ func TestScriptsSummary(t *testing.T) {
 	}}
 	w := serve(t, "GET /api/scripts", "/api/scripts", NewScriptsHandler(f, nil, fixedNow))
 	assertJSON(t, w, `[
-		{"name":"alpha","latest":{"time":"2026-10-05T12:00:00Z","ok":false,"error":"check failed"},"uptime":0.6666666666666666,"schedule":"","avgLatency":0,"p95Latency":0},
-		{"name":"beta","latest":{"time":"2026-10-05T12:00:00Z","ok":true,"error":null},"uptime":1,"schedule":"","avgLatency":0,"p95Latency":0}
+		{"name":"alpha","latest":{"time":"2026-10-05T12:00:00Z","ok":false,"error":"check failed"},"uptime":0.6666666666666666,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":2,"failedRuns":1},
+		{"name":"beta","latest":{"time":"2026-10-05T12:00:00Z","ok":true,"error":null},"uptime":1,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":1,"failedRuns":0}
 	]`)
 	assertWindow(t, f, "beta", testNow.Add(-7*24*time.Hour))
 }
@@ -182,7 +182,7 @@ func TestScriptsWithoutRuns(t *testing.T) {
 	f := &fakeStore{requests: []store.Request{{Script: "request-only", StartedAt: testNow, URL: "https://example.com"}}}
 	w := serve(t, "GET /api/scripts", "/api/scripts", NewScriptsHandler(f, nil, fixedNow))
 	// JSON parsing rejects NaN/Infinity; exact equality also distinguishes null/absent.
-	assertJSON(t, w, `[{"name":"request-only","latest":null,"uptime":0,"schedule":"","avgLatency":0,"p95Latency":0}]`)
+	assertJSON(t, w, `[{"name":"request-only","latest":null,"uptime":0,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0}]`)
 }
 
 // Latency statistics use raw requests in the card's fixed seven-day window.
@@ -214,8 +214,8 @@ func TestScriptsLatencies(t *testing.T) {
 			// A since parameter must not override the summary card's fixed window.
 			w := serve(t, "GET /api/scripts", "/api/scripts?since=2026-10-05T12:00:00Z", NewScriptsHandler(f, nil, fixedNow))
 			assertJSON(t, w, fmt.Sprintf(`[
-				{"name":"alpha","latest":null,"uptime":0,"schedule":"","avgLatency":%g,"p95Latency":%g},
-				{"name":"beta","latest":null,"uptime":0,"schedule":"","avgLatency":23,"p95Latency":23}
+				{"name":"alpha","latest":null,"uptime":0,"schedule":"","avgLatency":%g,"p95Latency":%g,"okRuns":0,"failedRuns":0},
+				{"name":"beta","latest":null,"uptime":0,"schedule":"","avgLatency":23,"p95Latency":23,"okRuns":0,"failedRuns":0}
 			]`, tc.avg, tc.p95))
 			assertWindow(t, f, "beta", since)
 		})
@@ -231,9 +231,10 @@ func TestScriptsSchedules(t *testing.T) {
 	schedules := map[string]string{"alpha": "@every 5m", "beta": "0 * * * *", "unused": "@daily"}
 	w := serve(t, "GET /api/scripts", "/api/scripts", NewScriptsHandler(f, schedules, fixedNow))
 	assertJSON(t, w, `[
-		{"name":"alpha","latest":null,"uptime":0,"schedule":"@every 5m","avgLatency":0,"p95Latency":0},
-		{"name":"beta","latest":null,"uptime":0,"schedule":"0 * * * *","avgLatency":0,"p95Latency":0},
-		{"name":"missing","latest":null,"uptime":0,"schedule":"","avgLatency":0,"p95Latency":0}
+		{"name":"alpha","latest":null,"uptime":0,"schedule":"@every 5m","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0},
+		{"name":"beta","latest":null,"uptime":0,"schedule":"0 * * * *","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0},
+		{"name":"missing","latest":null,"uptime":0,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0},
+		{"name":"unused","latest":null,"uptime":0,"schedule":"@daily","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0}
 	]`)
 }
 

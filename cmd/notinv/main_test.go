@@ -7,11 +7,13 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/trriplejay/notinv/internal/config"
+	"github.com/trriplejay/notinv/internal/rc"
 	"github.com/trriplejay/notinv/internal/runner"
 	"github.com/trriplejay/notinv/internal/store"
 )
@@ -314,6 +317,10 @@ func (s shutdownScript) Name() string                                     { retu
 func (s shutdownScript) Schedule() string                                 { return "@every 1s" }
 func (s shutdownScript) Run(ctx context.Context, _ *runner.Context) error { return s.run(ctx) }
 
+func staticServices(services *runner.Context) func(runner.Script) *runner.Context {
+	return func(runner.Script) *runner.Context { return services }
+}
+
 type shutdownRunStore struct {
 	insert func(context.Context, store.Run) error
 }
@@ -351,7 +358,7 @@ func TestShutdownInFlightRun(t *testing.T) {
 			recorded = true
 			return nil
 		}}
-		cancelRuns, done := startRunners(ctx, []runner.Script{script}, &runner.Context{Log: logger}, st)
+		cancelRuns, done := startRunners(ctx, []runner.Script{script}, staticServices(&runner.Context{Log: logger}), st)
 		defer cancelRuns()
 		runCtx := <-started
 		signalStop()
@@ -423,14 +430,21 @@ func TestShutdownIdleRunners(t *testing.T) {
 		defer signalStop()
 		var output bytes.Buffer
 		logger := newLogger(&output, "debug", "text")
+		var calls atomic.Int32
 		script := shutdownScript{run: func(context.Context) error {
-			t.Error("idle runner started a script during shutdown")
+			calls.Add(1)
 			return nil
 		}}
-		cancelRuns, done := startRunners(ctx, []runner.Script{script}, &runner.Context{Log: logger}, nil)
+		st := shutdownRunStore{insert: func(context.Context, store.Run) error { return nil }}
+		cancelRuns, done := startRunners(ctx, []runner.Script{script}, staticServices(&runner.Context{Log: logger}), st)
 		defer cancelRuns()
-		synctest.Wait()
+		synctest.Wait() // The startup run has finished; the runner is idle until its next fire.
 		signalStop()
+		defer func() {
+			if n := calls.Load(); n != 1 {
+				t.Errorf("script ran %d times, want only the startup run", n)
+			}
+		}()
 		started := time.Now()
 		if err := orchestrateShutdown(defaultShutdownBudget(), done, cancelRuns,
 			func(context.Context) error { return nil }, func() error { return nil }, logger); err != nil {
@@ -455,7 +469,7 @@ func TestShutdownCancelsRunAtDeadline(t *testing.T) {
 			return ctx.Err()
 		}}
 		st := shutdownRunStore{insert: func(context.Context, store.Run) error { return nil }}
-		cancelRuns, done := startRunners(ctx, []runner.Script{script}, &runner.Context{Log: logger}, st)
+		cancelRuns, done := startRunners(ctx, []runner.Script{script}, staticServices(&runner.Context{Log: logger}), st)
 		defer cancelRuns()
 		runCtx := <-started
 		signalStop()
@@ -474,4 +488,33 @@ func TestShutdownCancelsRunAtDeadline(t *testing.T) {
 		}
 		<-done
 	})
+}
+
+// Script requests must be recorded so the dashboard can chart them.
+func TestServicesRecordScriptRequests(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer server.Close()
+	st, err := store.Open(t.Context(), "file:"+filepath.Join(t.TempDir(), "test.db"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	logger := newLogger(&bytes.Buffer{}, "info", "text")
+	writer := rc.NewWriter(st, "test", logger, rc.Options{})
+	services := newServicesFor(logger, &config.Config{DiscordDryRun: true}, writer)(shutdownScript{})
+	resp, err := services.HTTP.Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	writer.Close() // Flushes buffered records.
+	requests, err := st.QueryRequests(t.Context(), "shutdown-test", time.Now().Add(-time.Minute), time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || requests[0].URL != server.URL || requests[0].StatusCode != http.StatusTeapot {
+		t.Fatalf("recorded requests = %+v, want one GET of %s with status 418", requests, server.URL)
+	}
 }

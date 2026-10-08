@@ -121,12 +121,9 @@ func TestRunRecordsRuns(t *testing.T) {
 			time.Sleep(25 * time.Millisecond) // Simulated work, not synchronization.
 			return nil
 		}}
+		started := time.Now()
 		stop := startTestRunner(t, script, rc, runs)
 		defer stop()
-		synctest.Wait()
-		if len(runs.snapshot()) != 0 {
-			t.Fatal("script ran before its first scheduled fire")
-		}
 		recorded := runs.waitForRuns(t, 2)
 		stop()
 		for _, run := range recorded {
@@ -141,6 +138,9 @@ func TestRunRecordsRuns(t *testing.T) {
 			default:
 				t.Error("record persisted without a script invocation")
 			}
+		}
+		if !recorded[0].StartedAt.Equal(started) {
+			t.Error("first run did not start immediately")
 		}
 		if !recorded[1].StartedAt.Equal(recorded[0].StartedAt.Add(time.Second)) {
 			t.Error("runs did not follow the one-second schedule")
@@ -215,15 +215,15 @@ func TestRunCronSchedule(t *testing.T) {
 		stop := startTestRunner(t, script, quietContext(), runs)
 		defer stop()
 		synctest.Wait()
-		if len(runs.snapshot()) != 0 {
-			t.Fatal("cron script ran immediately")
+		if recorded := runs.snapshot(); len(recorded) != 1 || !recorded[0].OK {
+			t.Fatalf("startup recorded %+v, want one immediate successful run", recorded)
 		}
 		// Explicitly advance to the minute boundary of synctest's fake clock.
 		time.Sleep(time.Minute)
 		synctest.Wait()
 		recorded := runs.snapshot()
-		if len(recorded) != 1 || !recorded[0].OK {
-			t.Fatalf("cron schedule recorded %+v, want one successful run", recorded)
+		if len(recorded) != 2 || !recorded[1].OK {
+			t.Fatalf("cron schedule recorded %+v, want a second successful run", recorded)
 		}
 	})
 }
@@ -231,16 +231,17 @@ func TestRunCronSchedule(t *testing.T) {
 func TestRunCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		runs := newFakeStore()
+		var calls atomic.Int32
 		script := fakeScript{name: "long-wait", schedule: "@every 1h", run: func(context.Context, *Context) error {
-			t.Error("cancelled schedule executed a script")
+			calls.Add(1)
 			return nil
 		}}
 		stop := startTestRunner(t, script, quietContext(), runs)
 		defer stop()
-		synctest.Wait() // Ensure Run has reached the cancellable timer wait.
+		synctest.Wait() // The immediate run is done; Run is in the cancellable timer wait.
 		stop()          // Requires a clean return within 200ms, not an hour.
-		if len(runs.snapshot()) != 0 {
-			t.Error("cancelled schedule persisted a run")
+		if calls.Load() != 1 || len(runs.snapshot()) != 1 {
+			t.Errorf("calls = %d, runs = %d; want only the immediate startup run", calls.Load(), len(runs.snapshot()))
 		}
 	})
 }
