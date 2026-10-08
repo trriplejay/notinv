@@ -113,15 +113,15 @@ test('dashboard with embedded assets, real Go API and SQLite', async t => {
     }));
     const light = await colors();
     await page.emulateMedia({ colorScheme: 'dark' });
-    await page.waitForFunction(() => Chart.getChart(document.querySelector('canvas')).options.scales.x.ticks.color === '#a5b5ce');
+    await page.waitForFunction(() => Chart.getChart(document.querySelector('canvas')).options.scales.x.ticks.color === '#8b95a9');
     const dark = await colors();
-    assert.equal(dark[0][0], 'rgb(12, 19, 32)');
-    assert.equal(dark[1][0], 'rgb(22, 33, 53)');
-    assert.equal(dark[2][0], 'rgb(16, 26, 43)');
+    assert.equal(dark[0][0], 'rgb(11, 15, 25)');
+    assert.equal(dark[1][0], 'rgb(18, 24, 38)');
+    assert.equal(dark[2][0], 'rgb(14, 20, 32)');
     for (let i = 0; i < 3; i++) assert.notDeepEqual(dark[i], light[i]);
-    assert.equal((await chartData(page)).grid, '#34445e');
+    assert.equal((await chartData(page)).grid, '#1f2838');
     await page.emulateMedia({ colorScheme: 'light' });
-    await page.waitForFunction(() => Chart.getChart(document.querySelector('canvas')).options.scales.x.ticks.color === '#53627a');
+    await page.waitForFunction(() => Chart.getChart(document.querySelector('canvas')).options.scales.x.ticks.color === '#64748b');
   });
 
   await t.test('no external requests or browser runtime errors', () => {

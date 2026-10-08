@@ -6,70 +6,207 @@
   <title>notinv · Monitoring</title>
   <link rel="icon" href="data:,">
   <style>
-    :root { color-scheme: light dark; --page: #f3f5f9; --text: #182439; --muted: #53627a; --card: #fff; --chart: #f8fafc; --border: #cbd5e1; --accent: #245bcc; --error: #b42342; }
+    :root {
+      color-scheme: light dark;
+      --page: #f5f6fa; --surface: #ffffff; --chart: #f8fafc; --raised: #eef1f6;
+      --text: #0f172a; --muted: #64748b; --border: #e2e6ee; --grid: #e6e9f0;
+      --accent: #4f46e5; --accent-soft: rgba(79, 70, 229, .1);
+      --ok: #059669; --ok-soft: rgba(5, 150, 105, .1);
+      --warn: #d97706; --warn-soft: rgba(217, 119, 6, .12);
+      --error: #e11d48; --error-soft: rgba(225, 29, 72, .08);
+      --idle: #94a3b8; --idle-soft: rgba(148, 163, 184, .16);
+      --shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 4px 16px rgba(15, 23, 42, .05);
+      --shadow-hover: 0 2px 4px rgba(15, 23, 42, .05), 0 12px 32px rgba(15, 23, 42, .08);
+      --radius: 14px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
     @media (prefers-color-scheme: dark) {
-      :root { --page: #0c1320; --text: #e5edf9; --muted: #a5b5ce; --card: #162135; --chart: #101a2b; --border: #34445e; --accent: #93b5ff; --error: #ff8ba6; }
+      :root {
+        --page: #0b0f19; --surface: #121826; --chart: #0e1420; --raised: #1a2232;
+        --text: #e6e9f2; --muted: #8b95a9; --border: #222b3c; --grid: #1f2838;
+        --accent: #818cf8; --accent-soft: rgba(129, 140, 248, .14);
+        --ok: #34d399; --ok-soft: rgba(52, 211, 153, .12);
+        --warn: #fbbf24; --warn-soft: rgba(251, 191, 36, .12);
+        --error: #fb7185; --error-soft: rgba(251, 113, 133, .1);
+        --idle: #64748b; --idle-soft: rgba(100, 116, 139, .2);
+        --shadow: 0 1px 2px rgba(0, 0, 0, .3);
+        --shadow-hover: 0 8px 28px rgba(0, 0, 0, .4);
+      }
     }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--page); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
-    main { max-width: 1440px; margin: auto; padding: 32px 24px; }
-    header, .card-heading, .chart-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; }
+    body { margin: 0; background: var(--page); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
     h1, h2, h3, p { margin: 0; }
-    h1 { font-size: 28px; letter-spacing: -.04em; }
-    h2 { font-size: 20px; overflow-wrap: anywhere; }
-    h3 { font-size: 15px; }
-    .muted, dt { color: var(--muted); }
-    #status { margin: 20px 0; min-height: 24px; }
-    #cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 540px), 1fr)); gap: 24px; }
-    .card { min-width: 0; background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
-    .badge { border: 1px solid var(--border); border-radius: 24px; padding: 4px 12px; font-size: 13px; }
-    .error { color: var(--error); }
-    dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin: 24px 0; }
-    dt { font-size: 12px; }
-    dd { margin: 3px 0 0; font-weight: 600; overflow-wrap: anywhere; }
-    button, select { font: inherit; background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; }
-    button { cursor: pointer; }
-    button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-    .chart-surface { position: relative; height: 260px; background: var(--chart); border-radius: 8px; margin-top: 16px; padding: 8px; }
-    .chart-status, .legend { margin-top: 10px; font-size: 12px; color: var(--muted); }
-    .legend { display: flex; flex-wrap: wrap; gap: 12px; }
-    .legend span::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--dot); margin-right: 5px; }
-    .run-error { margin-top: 12px; overflow-wrap: anywhere; }
-    @media (max-width: 600px) { main { padding: 20px 12px; } .card { padding: 18px; } }
+    [hidden] { display: none !important; }
+
+    /* App bar */
+    .topbar { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--page) 82%, transparent); backdrop-filter: saturate(1.4) blur(12px); border-bottom: 1px solid var(--border); }
+    .topbar-inner { max-width: 1440px; margin: auto; padding: 14px 24px; display: flex; align-items: center; gap: 16px; }
+    .brand { display: flex; align-items: center; gap: 10px; margin-right: auto; min-width: 0; }
+    .logo { width: 32px; height: 32px; flex: none; display: grid; place-items: center; border-radius: 9px; color: #fff; background: linear-gradient(135deg, #6366f1, #8b5cf6 60%, #ec4899); box-shadow: 0 4px 12px rgba(99, 102, 241, .35); }
+    h1 { font-size: 17px; font-weight: 650; letter-spacing: -.02em; }
+    .tagline { font-size: 12px; color: var(--muted); }
+    .live { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0 var(--ok); animation: pulse 2s infinite; }
+    .live.stale .live-dot { background: var(--warn); animation: none; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent); } 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+
+    button, select, input { font: inherit; color: var(--text); }
+    .btn { display: inline-flex; align-items: center; gap: 8px; background: var(--accent); color: #fff; border: 0; border-radius: 9px; padding: 8px 14px; font-weight: 550; cursor: pointer; transition: filter .15s, transform .05s; }
+    .btn:hover { filter: brightness(1.08); }
+    .btn:active { transform: translateY(1px); }
+    .btn svg { transition: transform .4s; }
+    .btn[aria-busy="true"] svg { animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    :is(button, select, input):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    main { max-width: 1440px; margin: auto; padding: 24px; }
+
+    /* Summary tiles */
+    #summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 16px; margin-bottom: 20px; }
+    .tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow); }
+    .tile-label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+    .tile-label::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--tone, var(--accent)); }
+    .tile-value { font-size: 26px; font-weight: 650; letter-spacing: -.03em; margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+    /* Toolbar */
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 16px; }
+    #status { font-size: 13px; color: var(--muted); margin-right: auto; min-height: 20px; }
+    .search { position: relative; }
+    .search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+    .search input { width: 240px; max-width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 9px; padding: 7px 12px 7px 32px; }
+    .search input::placeholder { color: var(--muted); }
+    .segmented { display: inline-flex; background: var(--raised); border-radius: 9px; padding: 3px; }
+    .segmented button { background: transparent; border: 0; border-radius: 7px; padding: 4px 12px; font-size: 13px; color: var(--muted); cursor: pointer; }
+    .segmented button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); font-weight: 550; }
+
+    /* Script cards */
+    #cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 560px), 1fr)); gap: 20px; }
+    .card, .skeleton { position: relative; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 22px; box-shadow: var(--shadow); overflow: hidden; }
+    .card { transition: box-shadow .2s, border-color .2s; }
+    .card:hover { box-shadow: var(--shadow-hover); }
+    .card::before { content: ''; position: absolute; inset: 0 0 auto; height: 3px; background: var(--state, var(--idle)); }
+    .card[data-state="ok"] { --state: var(--ok); --state-soft: var(--ok-soft); }
+    .card[data-state="failing"] { --state: var(--error); --state-soft: var(--error-soft); border-color: color-mix(in srgb, var(--error) 35%, var(--border)); }
+    .card[data-state="idle"] { --state: var(--idle); --state-soft: var(--idle-soft); }
+    .card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .card-title { min-width: 0; }
+    h2 { font-size: 16px; font-weight: 650; letter-spacing: -.01em; overflow-wrap: anywhere; }
+    .schedule { display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 12px; color: var(--muted); }
+    .schedule dd { margin: 0; font: 12px var(--mono); background: var(--raised); padding: 1px 7px; border-radius: 6px; color: var(--text); }
+    .badge { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--state, var(--idle)); background: var(--state-soft, var(--idle-soft)); }
+    .badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .run-error { display: flex; gap: 8px; margin-top: 14px; padding: 10px 12px; border-radius: 9px; background: var(--error-soft); color: var(--error); font: 12.5px/1.45 var(--mono); overflow-wrap: anywhere; }
+    .run-error::before { content: '!'; flex: none; width: 16px; height: 16px; border-radius: 50%; background: var(--error); color: var(--surface); font: 700 11px/16px system-ui, sans-serif; text-align: center; margin-top: 1px; }
+
+    .card { container-type: inline-size; }
+    .metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 18px 0; padding: 0; border: 1px solid var(--border); border-radius: 11px; overflow: hidden; }
+    .metrics > div { padding: 10px 14px; min-width: 0; box-shadow: 1px 0 0 var(--border), 0 1px 0 var(--border); }
+    .metrics > div:first-child { grid-column: span 2; }
+    @container (min-width: 420px) { .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    dt { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .metrics dd { margin: 2px 0 0; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .sub { display: block; font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+    .meter { height: 4px; margin-top: 6px; border-radius: 4px; background: var(--raised); overflow: hidden; }
+    .meter span { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--tone, var(--ok)); transition: width .5s ease; }
+
+    .chart-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    h3 { font-size: 13px; font-weight: 600; }
+    .range { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+    .range select { appearance: none; background-color: var(--raised); background-repeat: no-repeat; border: 1px solid transparent; border-radius: 8px; padding: 4px 26px 4px 10px; font-size: 12.5px; font-weight: 550; cursor: pointer;
+      background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: right 13px top 55%, right 9px top 55%; background-size: 4px 4px; }
+    .chart-surface { position: relative; height: 240px; background: var(--chart); border-radius: 11px; margin-top: 10px; padding: 10px 8px 6px; }
+    .chart-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-top: 10px; }
+    .chart-status, .legend { font-size: 11.5px; color: var(--muted); }
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .legend span::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--dot); }
+
+    /* Loading and empty states */
+    .skeleton { height: 470px; }
+    .skeleton::after { content: ''; position: absolute; inset: 0; background: linear-gradient(100deg, transparent 30%, var(--raised) 50%, transparent 70%); background-size: 200% 100%; animation: shimmer 1.4s infinite; }
+    .skeleton i { display: block; height: 14px; border-radius: 6px; background: var(--raised); margin-bottom: 12px; }
+    .skeleton i:nth-child(1) { width: 40%; height: 18px; } .skeleton i:nth-child(2) { width: 22%; margin-bottom: 24px; }
+    .skeleton i:nth-child(3) { height: 64px; margin-bottom: 24px; } .skeleton i:nth-child(4) { height: 240px; }
+    @keyframes shimmer { from { background-position: 150% 0; } to { background-position: -50% 0; } }
+    .empty { grid-column: 1 / -1; text-align: center; padding: 64px 24px; border: 1px dashed var(--border); border-radius: var(--radius); color: var(--muted); }
+    .empty svg { color: var(--accent); margin-bottom: 12px; }
+    .empty strong { display: block; color: var(--text); font-size: 15px; margin-bottom: 4px; }
+
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+    @media (max-width: 640px) {
+      .topbar-inner, main { padding-left: 16px; padding-right: 16px; }
+      .tagline, .live-text { display: none; }
+      .card { padding: 18px 16px; }
+      .search, .search input { width: 100%; }
+      #status { flex-basis: 100%; }
+    }
   </style>
   <script src="/vendor/chart.umd.min.js"></script>
   <script src="/vendor/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
 <body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></span>
+        <div><h1>notinv</h1><p class="tagline">Checks, at a glance</p></div>
+      </div>
+      <span class="live" id="live"><span class="live-dot" aria-hidden="true"></span><span class="live-text">Live · every 30s</span></span>
+      <button id="refresh" class="btn" type="button"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>Refresh now</button>
+    </div>
+  </header>
   <main>
-    <header>
-      <div><h1>notinv</h1><p class="muted">Checks, at a glance · live monitoring</p></div>
-      <button id="refresh" type="button">Refresh now</button>
-    </header>
-    <p id="status" role="status" aria-live="polite">Loading scripts…</p>
-    <section id="cards" aria-label="Monitored scripts"></section>
+    <section id="summary" aria-label="Overview">
+      <div class="tile" style="--tone: var(--accent)"><div class="tile-label">Scripts</div><div class="tile-value" data-summary="total">–</div></div>
+      <div class="tile" style="--tone: var(--ok)"><div class="tile-label">Healthy</div><div class="tile-value" data-summary="healthy">–</div></div>
+      <div class="tile" style="--tone: var(--error)"><div class="tile-label">Failing</div><div class="tile-value" data-summary="failing">–</div></div>
+      <div class="tile" style="--tone: var(--warn)"><div class="tile-label">Avg uptime · 7d</div><div class="tile-value" data-summary="uptime">–</div></div>
+    </section>
+    <div class="toolbar">
+      <p id="status" role="status" aria-live="polite">Loading scripts…</p>
+      <label class="search"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="filter" type="search" placeholder="Filter scripts…" aria-label="Filter scripts by name"></label>
+      <div class="segmented" role="group" aria-label="Show scripts">
+        <button type="button" data-view="all" aria-pressed="true">All</button>
+        <button type="button" data-view="failing" aria-pressed="false">Failing</button>
+      </div>
+    </div>
+    <section id="cards" aria-label="Monitored scripts">
+      <div class="skeleton" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      <div class="skeleton" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+    </section>
+    <div id="empty" class="empty" hidden>
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+      <strong data-empty="title"></strong><span data-empty="body"></span>
+    </div>
     <noscript>Enable JavaScript to load monitoring data and charts.</noscript>
   </main>
   <template id="card-template">
-    <article class="card">
-      <div class="card-heading"><h2></h2><span class="badge"></span></div>
+    <article class="card" data-state="idle">
+      <div class="card-heading">
+        <div class="card-title">
+          <h2></h2>
+          <dl class="schedule"><dt>Schedule</dt><dd data-field="schedule"></dd></dl>
+        </div>
+        <span class="badge"></span>
+      </div>
       <p class="run-error error" hidden></p>
-      <dl>
-        <div><dt>Schedule</dt><dd data-field="schedule"></dd></div>
-        <div><dt>Last run</dt><dd data-field="lastRun"></dd></div>
-        <div><dt>Latest run · OK / failing</dt><dd data-field="counts"></dd></div>
-        <div><dt>Uptime · last 7 days</dt><dd data-field="uptime"></dd></div>
-        <div><dt>Average latency · last 7 days</dt><dd data-field="average"></dd></div>
-        <div><dt>p95 latency · last 7 days</dt><dd data-field="p95"></dd></div>
+      <dl class="metrics">
+        <div><dt>Last run</dt><dd data-field="lastRun"></dd><span class="sub" data-relative></span></div>
+        <div><dt title="Latest run · OK / failing">Latest run</dt><dd data-field="counts"></dd></div>
+        <div><dt title="Uptime · last 7 days">Uptime · 7d</dt><dd data-field="uptime"></dd><div class="meter" aria-hidden="true"><span></span></div></div>
+        <div><dt title="Average latency · last 7 days">Avg latency · 7d</dt><dd data-field="average"></dd></div>
+        <div><dt title="p95 latency · last 7 days">p95 latency · 7d</dt><dd data-field="p95"></dd></div>
       </dl>
       <div class="chart-heading">
         <h3>Request latency</h3>
-        <label>Range <select aria-label="Chart time range"><option value="3600000">1h</option><option value="86400000" selected>24h</option><option value="604800000">7d</option></select></label>
+        <label class="range">Range <select aria-label="Chart time range"><option value="3600000">1h</option><option value="86400000" selected>24h</option><option value="604800000">7d</option></select></label>
       </div>
       <div class="chart-surface"><canvas role="img" aria-label="Request latency over time"></canvas></div>
-      <p class="chart-status" role="status"></p>
-      <div class="legend" aria-label="Point status colors">
-        <span style="--dot:#22a579">2xx</span><span style="--dot:#6099f8">3xx</span><span style="--dot:#ef795f">4xx failure</span><span style="--dot:#e34c75">5xx failure</span><span style="--dot:#c26bf3">Request error</span>
+      <div class="chart-footer">
+        <p class="chart-status" role="status"></p>
+        <div class="legend" aria-label="Point status colors">
+          <span style="--dot:#22a579">2xx</span><span style="--dot:#6099f8">3xx</span><span style="--dot:#ef795f">4xx failure</span><span style="--dot:#e34c75">5xx failure</span><span style="--dot:#c26bf3">Request error</span>
+        </div>
       </div>
     </article>
   </template>
@@ -78,7 +215,12 @@
     const cards = new Map();
     const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
     const status = document.getElementById('status');
+    const refreshButton = document.getElementById('refresh');
+    const filterInput = document.getElementById('filter');
+    const lineColors = ['#6366f1', '#0ea5e9', '#f59e0b', '#14b8a6', '#ec4899', '#84cc16'];
     let refreshing = false;
+    let view = 'all';
+    let loaded = false;
 
     function pointColor(point) {
       if (point.error !== null || point.status < 100 || point.status >= 600) return '#c26bf3';
@@ -91,28 +233,56 @@
       }
     }
 
+    function cssVar(name) {
+      return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    }
+
+    // Soft vertical fill under a single series; multiple series stay unfilled
+    // so overlapping areas don't muddy each other.
+    function areaFill(color) {
+      return context => {
+        const { ctx, chartArea } = context.chart;
+        if (!chartArea) return 'transparent';
+        const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+        gradient.addColorStop(0, color + '38');
+        gradient.addColorStop(1, color + '00');
+        return gradient;
+      };
+    }
+
     function datasetsFor(points) {
       const groups = new Map();
       for (const point of points) {
         if (!groups.has(point.url)) groups.set(point.url, []);
         groups.get(point.url).push(point);
       }
-      return Array.from(groups, ([url, rows], index) => ({
-        label: url,
-        data: rows.map(point => ({ x: point.time, y: point.latency })),
-        borderColor: `hsl(${(index * 137.5 + 210) % 360}, 65%, 60%)`,
-        pointBackgroundColor: rows.map(pointColor),
-        pointBorderColor: rows.map(pointColor),
-        pointRadius: 3,
-        borderWidth: 2,
-        tension: 0.15
-      }));
+      const single = groups.size === 1;
+      return Array.from(groups, ([url, rows], index) => {
+        const color = lineColors[index % lineColors.length];
+        return {
+          label: url,
+          data: rows.map(point => ({ x: point.time, y: point.latency })),
+          borderColor: color,
+          backgroundColor: single ? areaFill(color) : color,
+          fill: single,
+          pointBackgroundColor: rows.map(pointColor),
+          pointBorderColor: rows.map(pointColor),
+          pointRadius: 2.5,
+          pointHoverRadius: 5,
+          borderWidth: 2,
+          tension: 0.3
+        };
+      });
     }
 
     function applyChartTheme(chart) {
-      const text = darkMode.matches ? '#a5b5ce' : '#53627a';
-      const grid = darkMode.matches ? '#34445e' : '#cbd5e1';
+      const text = cssVar('--muted');
+      const grid = cssVar('--grid');
       chart.options.plugins.legend.labels.color = text;
+      Object.assign(chart.options.plugins.tooltip, {
+        backgroundColor: cssVar('--surface'), titleColor: cssVar('--text'), bodyColor: text,
+        borderColor: cssVar('--border')
+      });
       for (const axis of ['x', 'y']) {
         chart.options.scales[axis].ticks.color = text;
         chart.options.scales[axis].title.color = text;
@@ -153,14 +323,33 @@
       element.querySelector('h2').textContent = name;
       const canvas = element.querySelector('canvas');
       canvas.setAttribute('aria-label', `Request latency over time for ${name}`);
+      const font = { family: getComputedStyle(document.body).fontFamily, size: 11 };
       const chart = new Chart(canvas, {
         type: 'line', data: { datasets: [] },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: { legend: { labels: { color: '#53627a', boxWidth: 12 } } },
+          interaction: { mode: 'nearest', axis: 'x', intersect: false },
+          plugins: {
+            legend: {
+              align: 'start',
+              labels: {
+                usePointStyle: true, pointStyle: 'circle', boxWidth: 6, boxHeight: 6, padding: 12, font,
+                // Swatches follow the line color, not the first point's status color.
+                generateLabels: chart => Chart.defaults.plugins.legend.labels.generateLabels(chart).map(label => {
+                  const color = chart.data.datasets[label.datasetIndex].borderColor;
+                  return { ...label, fillStyle: color, strokeStyle: color };
+                })
+              }
+            },
+            tooltip: {
+              borderWidth: 1, padding: 10, cornerRadius: 8, boxPadding: 4, usePointStyle: true,
+              titleFont: { ...font, weight: '600' }, bodyFont: font,
+              callbacks: { label: item => ` ${item.formattedValue} ms · ${item.dataset.label}` }
+            }
+          },
           scales: {
-            x: { type: 'time', title: { display: true, text: 'Time' }, ticks: {}, grid: {} },
-            y: { beginAtZero: true, title: { display: true, text: 'Latency (ms)' }, ticks: {}, grid: {} }
+            x: { type: 'time', title: { display: false, text: 'Time' }, ticks: { font, maxRotation: 0, autoSkipPadding: 16 }, grid: { display: false }, border: { display: false } },
+            y: { beginAtZero: true, title: { display: true, text: 'Latency (ms)', font }, ticks: { font, maxTicksLimit: 5 }, grid: {}, border: { display: false } }
           }
         }
       });
@@ -168,6 +357,21 @@
       const card = { name, element, chart, range: element.querySelector('select'), message: element.querySelector('.chart-status') };
       card.range.addEventListener('change', () => refreshSeries(card));
       return card;
+    }
+
+    function relativeTime(time) {
+      const seconds = Math.round((new Date(time).getTime() - Date.now()) / 1000);
+      const format = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+      for (const [unit, size] of [['day', 86400], ['hour', 3600], ['minute', 60]]) {
+        if (Math.abs(seconds) >= size) return format.format(Math.round(seconds / size), unit);
+      }
+      return format.format(seconds, 'second');
+    }
+
+    function uptimeTone(uptime) {
+      if (uptime >= 0.99) return 'var(--ok)';
+      if (uptime >= 0.95) return 'var(--warn)';
+      return 'var(--error)';
     }
 
     function updateCard(card, script) {
@@ -180,18 +384,50 @@
         p95: `${script.p95Latency.toFixed(1)} ms`
       };
       for (const [field, value] of Object.entries(fields)) card.element.querySelector(`[data-field="${field}"]`).textContent = value;
+      card.element.querySelector('[data-relative]').textContent = script.latest ? relativeTime(script.latest.time) : '';
+      const meter = card.element.querySelector('.meter span');
+      meter.style.width = `${Math.max(0, Math.min(1, script.uptime)) * 100}%`;
+      meter.style.setProperty('--tone', uptimeTone(script.uptime));
+      const state = script.latest ? (script.latest.ok ? 'ok' : 'failing') : 'idle';
+      card.element.dataset.state = state;
       const badge = card.element.querySelector('.badge');
-      badge.textContent = script.latest ? (script.latest.ok ? 'OK' : 'Failing') : 'No runs yet';
-      badge.classList.toggle('error', Boolean(script.latest && !script.latest.ok));
+      badge.textContent = { ok: 'OK', failing: 'Failing', idle: 'No runs yet' }[state];
       const error = card.element.querySelector('.run-error');
       error.textContent = script.latest?.error || '';
       error.hidden = !error.textContent;
     }
 
+    function updateSummary(scripts) {
+      const failing = scripts.filter(s => s.latest && !s.latest.ok).length;
+      const healthy = scripts.filter(s => s.latest?.ok).length;
+      const uptime = scripts.length ? scripts.reduce((sum, s) => sum + s.uptime, 0) / scripts.length : null;
+      const values = { total: scripts.length, healthy, failing, uptime: uptime === null ? '–' : `${(uptime * 100).toFixed(1)}%` };
+      for (const [key, value] of Object.entries(values)) document.querySelector(`[data-summary="${key}"]`).textContent = value;
+    }
+
+    function applyFilter() {
+      const query = filterInput.value.trim().toLowerCase();
+      let visible = 0;
+      for (const card of cards.values()) {
+        const show = card.name.toLowerCase().includes(query) && (view === 'all' || card.element.dataset.state === 'failing');
+        card.element.hidden = !show;
+        if (show) visible++;
+      }
+      const empty = document.getElementById('empty');
+      const [title, body] = cards.size === 0
+        ? ['No scripts yet', 'Checks will appear here after they run.']
+        : ['No matching scripts', view === 'failing' ? 'Nothing is failing right now.' : 'Try a different filter.'];
+      empty.querySelector('[data-empty="title"]').textContent = title;
+      empty.querySelector('[data-empty="body"]').textContent = body;
+      empty.hidden = !loaded || visible > 0;
+    }
+
     async function refreshDashboard() {
       if (refreshing) return;
       refreshing = true;
+      refreshButton.setAttribute('aria-busy', 'true');
       status.textContent = 'Refreshing…';
+      const live = document.getElementById('live');
       try {
         const scripts = await fetchJSON('/api/scripts', AbortSignal.timeout(20000));
         const activeNames = new Set(scripts.map(script => script.name));
@@ -207,11 +443,18 @@
           if (!cards.has(script.name)) cards.set(script.name, createCard(script.name));
           updateCard(cards.get(script.name), script);
         }
+        updateSummary(scripts);
+        live.classList.remove('stale');
         status.textContent = scripts.length ? `${scripts.length} scripts · Updated ${new Date().toLocaleTimeString()} · Refreshes every 30s` : 'No scripts recorded yet. Checks will appear after they run.';
       } catch (error) {
+        live.classList.add('stale');
         status.textContent = `${error.message}. Summary may be stale; retrying automatically.`;
       } finally {
         refreshing = false;
+        loaded = true;
+        refreshButton.removeAttribute('aria-busy');
+        for (const skeleton of document.querySelectorAll('.skeleton')) skeleton.remove();
+        applyFilter();
         // Refresh existing charts even when the summary endpoint is unavailable.
         for (const card of cards.values()) void refreshSeries(card);
       }
@@ -223,7 +466,15 @@
         card.chart.update();
       }
     });
-    document.getElementById('refresh').addEventListener('click', refreshDashboard);
+    filterInput.addEventListener('input', applyFilter);
+    for (const button of document.querySelectorAll('[data-view]')) {
+      button.addEventListener('click', () => {
+        view = button.dataset.view;
+        for (const other of document.querySelectorAll('[data-view]')) other.setAttribute('aria-pressed', String(other === button));
+        applyFilter();
+      });
+    }
+    refreshButton.addEventListener('click', refreshDashboard);
     void refreshDashboard();
     setInterval(refreshDashboard, 30000);
   </script>
