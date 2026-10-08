@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>notinv · Script details</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page: #f5f6fa; --surface: #ffffff; --chart: #f8fafc; --raised: #eef1f6;
+      --text: #0f172a; --muted: #64748b; --border: #e2e6ee; --grid: #e6e9f0;
+      --accent: #4f46e5; --accent-soft: rgba(79, 70, 229, .1);
+      --ok: #059669; --ok-soft: rgba(5, 150, 105, .1);
+      --warn: #d97706; --warn-soft: rgba(217, 119, 6, .12);
+      --error: #e11d48; --error-soft: rgba(225, 29, 72, .08);
+      --idle: #94a3b8; --idle-soft: rgba(148, 163, 184, .16);
+      --shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 4px 16px rgba(15, 23, 42, .05);
+      --shadow-hover: 0 2px 4px rgba(15, 23, 42, .05), 0 12px 32px rgba(15, 23, 42, .08);
+      --radius: 14px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page: #0b0f19; --surface: #121826; --chart: #0e1420; --raised: #1a2232;
+        --text: #e6e9f2; --muted: #8b95a9; --border: #222b3c; --grid: #1f2838;
+        --accent: #818cf8; --accent-soft: rgba(129, 140, 248, .14);
+        --ok: #34d399; --ok-soft: rgba(52, 211, 153, .12);
+        --warn: #fbbf24; --warn-soft: rgba(251, 191, 36, .12);
+        --error: #fb7185; --error-soft: rgba(251, 113, 133, .1);
+        --idle: #64748b; --idle-soft: rgba(100, 116, 139, .2);
+        --shadow: 0 1px 2px rgba(0, 0, 0, .3);
+        --shadow-hover: 0 8px 28px rgba(0, 0, 0, .4);
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--page); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+    h1, h2, h3, p { margin: 0; }
+    [hidden] { display: none !important; }
+
+    /* App bar */
+    .topbar { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--page) 82%, transparent); backdrop-filter: saturate(1.4) blur(12px); border-bottom: 1px solid var(--border); }
+    .topbar-inner { max-width: 1000px; margin: auto; padding: 14px 24px; display: flex; align-items: center; gap: 16px; }
+    .brand { display: flex; align-items: center; gap: 10px; margin-right: auto; min-width: 0; }
+    .logo { width: 32px; height: 32px; flex: none; display: grid; place-items: center; border-radius: 9px; color: #fff; background: linear-gradient(135deg, #6366f1, #8b5cf6 60%, #ec4899); box-shadow: 0 4px 12px rgba(99, 102, 241, .35); }
+    h1 { font-size: 17px; font-weight: 650; letter-spacing: -.02em; }
+    .tagline { font-size: 12px; color: var(--muted); }
+    .live { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0 var(--ok); animation: pulse 2s infinite; }
+    .live.stale .live-dot { background: var(--warn); animation: none; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent); } 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+
+    button, select { font: inherit; color: var(--text); }
+    .btn { display: inline-flex; align-items: center; gap: 8px; background: var(--accent); color: #fff; border: 0; border-radius: 9px; padding: 8px 14px; font-weight: 550; cursor: pointer; transition: filter .15s, transform .05s; }
+    .btn:hover { filter: brightness(1.08); }
+    .btn:active { transform: translateY(1px); }
+    .btn svg { transition: transform .4s; }
+    .btn[aria-busy="true"] svg { animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    :is(a, button, select):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    main { max-width: 1000px; margin: auto; padding: 24px; }
+
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 16px; }
+    #status { font-size: 13px; color: var(--muted); margin-right: auto; min-height: 20px; }
+    .back { color: var(--accent); }
+
+    /* Script cards */
+    #cards { display: grid; grid-template-columns: minmax(0, 1fr); }
+    .card { position: relative; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 22px; box-shadow: var(--shadow); overflow: hidden; }
+    .card { transition: box-shadow .2s, border-color .2s; }
+    .card:hover { box-shadow: var(--shadow-hover); }
+    .card::before { content: ''; position: absolute; inset: 0 0 auto; height: 3px; background: var(--state, var(--idle)); }
+    .card[data-state="ok"] { --state: var(--ok); --state-soft: var(--ok-soft); }
+    .card[data-state="failing"] { --state: var(--error); --state-soft: var(--error-soft); border-color: color-mix(in srgb, var(--error) 35%, var(--border)); }
+    .card[data-state="idle"] { --state: var(--idle); --state-soft: var(--idle-soft); }
+    .card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .card-title { min-width: 0; }
+    h2 { font-size: 16px; font-weight: 650; letter-spacing: -.01em; overflow-wrap: anywhere; }
+    .schedule { display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 12px; color: var(--muted); }
+    .schedule dd { margin: 0; font: 12px var(--mono); background: var(--raised); padding: 1px 7px; border-radius: 6px; color: var(--text); }
+    .badge { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--state, var(--idle)); background: var(--state-soft, var(--idle-soft)); }
+    .badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .run-error { display: flex; gap: 8px; margin-top: 14px; padding: 10px 12px; border-radius: 9px; background: var(--error-soft); color: var(--error); font: 12.5px/1.45 var(--mono); overflow-wrap: anywhere; }
+    .run-error::before { content: '!'; flex: none; width: 16px; height: 16px; border-radius: 50%; background: var(--error); color: var(--surface); font: 700 11px/16px system-ui, sans-serif; text-align: center; margin-top: 1px; }
+
+    .card { container-type: inline-size; }
+    .metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 18px 0; padding: 0; border: 1px solid var(--border); border-radius: 11px; overflow: hidden; }
+    .metrics > div { padding: 10px 14px; min-width: 0; box-shadow: 1px 0 0 var(--border), 0 1px 0 var(--border); }
+    .metrics > div:first-child { grid-column: span 2; }
+    @container (min-width: 420px) { .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    dt { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .metrics dd { margin: 2px 0 0; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .sub { display: block; font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+    .meter { height: 4px; margin-top: 6px; border-radius: 4px; background: var(--raised); overflow: hidden; }
+    .meter span { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--tone, var(--ok)); transition: width .5s ease; }
+
+    .chart-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    h3 { font-size: 13px; font-weight: 600; }
+    .range { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+    .range select { appearance: none; background-color: var(--raised); background-repeat: no-repeat; border: 1px solid transparent; border-radius: 8px; padding: 4px 26px 4px 10px; font-size: 12.5px; font-weight: 550; cursor: pointer;
+      background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: right 13px top 55%, right 9px top 55%; background-size: 4px 4px; }
+    .chart-surface { position: relative; height: 240px; background: var(--chart); border-radius: 11px; margin-top: 10px; padding: 10px 8px 6px; }
+    .chart-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-top: 10px; }
+    .chart-status, .legend { font-size: 11.5px; color: var(--muted); }
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .legend span::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--dot); }
+
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+    @media (max-width: 640px) {
+      .topbar-inner, main { padding-left: 16px; padding-right: 16px; }
+      .tagline, .live-text { display: none; }
+      .card { padding: 18px 16px; }
+      #status { flex-basis: 100%; }
+    }
+  </style>
+  <script src="/vendor/chart.umd.min.js"></script>
+  <script src="/vendor/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></span>
+        <div><h1>notinv</h1><p class="tagline">Script details</p></div>
+      </div>
+      <span class="live" id="live"><span class="live-dot" aria-hidden="true"></span><span class="live-text">Live · every 30s</span></span>
+      <button id="refresh" class="btn" type="button"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>Refresh now</button>
+    </div>
+  </header>
+  <main>
+    <div class="toolbar">
+      <p id="status" role="status" aria-live="polite">Loading script…</p>
+      <a class="back" href="/">Back to dashboard</a>
+    </div>
+    <section id="cards" aria-label="Script details"></section>
+    <noscript>Enable JavaScript to load monitoring data and charts.</noscript>
+  </main>
+  <template id="card-template">
+    <article class="card" data-state="idle">
+      <div class="card-heading">
+        <div class="card-title">
+          <h2></h2>
+          <dl class="schedule"><dt>Schedule</dt><dd data-field="schedule"></dd></dl>
+        </div>
+        <span class="badge"></span>
+      </div>
+      <p class="run-error error" hidden></p>
+      <dl class="metrics">
+        <div><dt>Last run</dt><dd data-field="lastRun"></dd><span class="sub" data-relative></span></div>
+        <div><dt title="Runs · last 7 days · OK / failing">Runs · 7d</dt><dd data-field="counts"></dd></div>
+        <div><dt title="Uptime · last 7 days">Uptime · 7d</dt><dd data-field="uptime"></dd><div class="meter" aria-hidden="true"><span></span></div></div>
+        <div><dt title="Average latency · last 7 days">Avg latency · 7d</dt><dd data-field="average"></dd></div>
+        <div><dt title="p95 latency · last 7 days">p95 latency · 7d</dt><dd data-field="p95"></dd></div>
+      </dl>
+      <div class="chart-heading">
+        <h3>Request latency</h3>
+        <label class="range">Range <select aria-label="Chart time range"><option value="3600000">1h</option><option value="86400000" selected>24h</option><option value="604800000">7d</option></select></label>
+      </div>
+      <div class="chart-surface"><canvas role="img" aria-label="Request latency over time"></canvas></div>
+      <div class="chart-footer">
+        <p class="chart-status" role="status"></p>
+        <div class="legend" aria-label="Point status colors">
+          <span style="--dot:#22a579">2xx</span><span style="--dot:#6099f8">3xx</span><span style="--dot:#ef795f">4xx failure</span><span style="--dot:#e34c75">5xx failure</span><span style="--dot:#c26bf3">Request error</span>
+        </div>
+      </div>
+    </article>
+  </template>
+  <script>
+    'use strict';
+    // URLSearchParams decodes the query once; API paths re-encode the full name.
+    const name = new URLSearchParams(window.location.search).get('name');
+    let card = null;
+    const darkMode = window.matchMedia('(prefers-color-scheme: dark)');
+    const status = document.getElementById('status');
+    const refreshButton = document.getElementById('refresh');
+    const lineColors = ['#6366f1', '#0ea5e9', '#f59e0b', '#14b8a6', '#ec4899', '#84cc16'];
+    let refreshing = false;
+
+    function pointColor(point) {
+      if (point.error !== null || point.status < 100 || point.status >= 600) return '#c26bf3';
+      switch (Math.floor(point.status / 100)) {
+        case 2: return '#22a579';
+        case 3: return '#6099f8';
+        case 4: return '#ef795f';
+        case 5: return '#e34c75';
+        default: return '#94a3b8';
+      }
+    }
+
+    function cssVar(name) {
+      return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    }
+
+    // Soft vertical fill under a single series; multiple series stay unfilled
+    // so overlapping areas don't muddy each other.
+    function areaFill(color) {
+      return context => {
+        const { ctx, chartArea } = context.chart;
+        if (!chartArea) return 'transparent';
+        const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+        gradient.addColorStop(0, color + '38');
+        gradient.addColorStop(1, color + '00');
+        return gradient;
+      };
+    }
+
+    function datasetsFor(points) {
+      const groups = new Map();
+      for (const point of points) {
+        if (!groups.has(point.url)) groups.set(point.url, []);
+        groups.get(point.url).push(point);
+      }
+      const single = groups.size === 1;
+      return Array.from(groups, ([url, rows], index) => {
+        const color = lineColors[index % lineColors.length];
+        return {
+          label: url,
+          data: rows.map(point => ({ x: point.time, y: point.latency })),
+          borderColor: color,
+          backgroundColor: single ? areaFill(color) : color,
+          fill: single,
+          pointBackgroundColor: rows.map(pointColor),
+          pointBorderColor: rows.map(pointColor),
+          pointRadius: 2.5,
+          pointHoverRadius: 5,
+          borderWidth: 2,
+          tension: 0.3
+        };
+      });
+    }
+
+    function applyChartTheme(chart) {
+      const text = cssVar('--muted');
+      const grid = cssVar('--grid');
+      chart.options.plugins.legend.labels.color = text;
+      Object.assign(chart.options.plugins.tooltip, {
+        backgroundColor: cssVar('--surface'), titleColor: cssVar('--text'), bodyColor: text,
+        borderColor: cssVar('--border')
+      });
+      for (const axis of ['x', 'y']) {
+        chart.options.scales[axis].ticks.color = text;
+        chart.options.scales[axis].title.color = text;
+        chart.options.scales[axis].grid.color = grid;
+      }
+    }
+
+    async function fetchJSON(path, signal) {
+      const response = await fetch(path, { signal, cache: 'no-store' });
+      if (!response.ok) throw new Error(`Request failed (${response.status})`);
+      return response.json();
+    }
+
+    async function refreshSeries(card) {
+      card.controller?.abort();
+      const controller = new AbortController();
+      card.controller = controller;
+      const spanMs = Number(card.range.value);
+      const since = new Date(Date.now() - spanMs).toISOString();
+      card.message.textContent = 'Loading requests…';
+      try {
+        const points = await fetchJSON('/api/scripts/' + encodeURIComponent(card.name) + '/requests/series?since=' + encodeURIComponent(since), controller.signal);
+        if (controller.signal.aborted) return;
+        card.chart.data.datasets = datasetsFor(points);
+        card.chart.options.scales.x.min = since;
+        card.chart.options.scales.x.max = new Date().toISOString();
+        card.chart.update();
+        card.message.textContent = points.length ? `${points.length} requests in this window` : 'No requests in this window.';
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        card.message.textContent = `${error.message}. Chart may be stale; retry with the range picker or refresh.`;
+      }
+    }
+
+    function createCard(name) {
+      const element = document.getElementById('card-template').content.firstElementChild.cloneNode(true);
+      document.getElementById('cards').append(element);
+      element.querySelector('h2').textContent = name;
+      const canvas = element.querySelector('canvas');
+      canvas.setAttribute('aria-label', `Request latency over time for ${name}`);
+      const font = { family: getComputedStyle(document.body).fontFamily, size: 11 };
+      const chart = new Chart(canvas, {
+        type: 'line', data: { datasets: [] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          interaction: { mode: 'nearest', axis: 'x', intersect: false },
+          plugins: {
+            legend: {
+              align: 'start',
+              labels: {
+                usePointStyle: true, pointStyle: 'circle', boxWidth: 6, boxHeight: 6, padding: 12, font,
+                // Swatches follow the line color, not the first point's status color.
+                generateLabels: chart => Chart.defaults.plugins.legend.labels.generateLabels(chart).map(label => {
+                  const color = chart.data.datasets[label.datasetIndex].borderColor;
+                  return { ...label, fillStyle: color, strokeStyle: color };
+                })
+              }
+            },
+            tooltip: {
+              borderWidth: 1, padding: 10, cornerRadius: 8, boxPadding: 4, usePointStyle: true,
+              titleFont: { ...font, weight: '600' }, bodyFont: font,
+              callbacks: { label: item => ` ${item.formattedValue} ms · ${item.dataset.label}` }
+            }
+          },
+          scales: {
+            x: { type: 'time', title: { display: false, text: 'Time' }, ticks: { font, maxRotation: 0, autoSkipPadding: 16 }, grid: { display: false }, border: { display: false } },
+            y: { beginAtZero: true, title: { display: true, text: 'Latency (ms)', font }, ticks: { font, maxTicksLimit: 5 }, grid: {}, border: { display: false } }
+          }
+        }
+      });
+      applyChartTheme(chart);
+      const card = { name, element, chart, range: element.querySelector('select'), message: element.querySelector('.chart-status') };
+      card.range.addEventListener('change', () => refreshSeries(card));
+      return card;
+    }
+
+    function relativeTime(time) {
+      const seconds = Math.round((new Date(time).getTime() - Date.now()) / 1000);
+      const format = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+      for (const [unit, size] of [['day', 86400], ['hour', 3600], ['minute', 60]]) {
+        if (Math.abs(seconds) >= size) return format.format(Math.round(seconds / size), unit);
+      }
+      return format.format(seconds, 'second');
+    }
+
+    function uptimeTone(uptime) {
+      if (uptime >= 0.99) return 'var(--ok)';
+      if (uptime >= 0.95) return 'var(--warn)';
+      return 'var(--error)';
+    }
+
+    function updateCard(card, script) {
+      const fields = {
+        schedule: script.schedule || 'Not scheduled',
+        lastRun: script.latest ? new Date(script.latest.time).toLocaleString() : 'Never run',
+        counts: `${script.okRuns} OK / ${script.failedRuns} failing`,
+        uptime: `${(script.uptime * 100).toFixed(1)}%`,
+        average: `${script.avgLatency.toFixed(1)} ms`,
+        p95: `${script.p95Latency.toFixed(1)} ms`
+      };
+      for (const [field, value] of Object.entries(fields)) card.element.querySelector(`[data-field="${field}"]`).textContent = value;
+      card.element.querySelector('[data-relative]').textContent = script.latest ? relativeTime(script.latest.time) : '';
+      const meter = card.element.querySelector('.meter span');
+      meter.style.width = `${Math.max(0, Math.min(1, script.uptime)) * 100}%`;
+      meter.style.setProperty('--tone', uptimeTone(script.uptime));
+      const state = script.latest ? (script.latest.ok ? 'ok' : 'failing') : 'idle';
+      card.element.dataset.state = state;
+      const badge = card.element.querySelector('.badge');
+      badge.textContent = { ok: 'OK', failing: 'Failing', idle: 'No runs yet' }[state];
+      const error = card.element.querySelector('.run-error');
+      error.textContent = script.latest?.error || '';
+      error.hidden = !error.textContent;
+    }
+
+    function showNotFound() {
+      if (card) {
+        card.controller?.abort();
+        card.chart.destroy();
+        card.element.remove();
+        card = null;
+      }
+      status.textContent = 'Script not found. Choose a script from the dashboard.';
+    }
+
+    async function refreshDashboard() {
+      if (refreshing) return;
+      if (name === null) {
+        showNotFound();
+        return;
+      }
+      refreshing = true;
+      refreshButton.setAttribute('aria-busy', 'true');
+      status.textContent = 'Refreshing…';
+      const live = document.getElementById('live');
+      try {
+        const scripts = await fetchJSON('/api/scripts', AbortSignal.timeout(20000));
+        const script = scripts.find(script => script.name === name);
+        live.classList.remove('stale');
+        if (!script) {
+          showNotFound();
+          return;
+        }
+        if (!card) card = createCard(name);
+        updateCard(card, script);
+        status.textContent = `Updated ${new Date().toLocaleTimeString()} · Refreshes every 30s`;
+      } catch (error) {
+        live.classList.add('stale');
+        status.textContent = card
+          ? 'Unable to refresh script details. Displayed data may be stale; retrying automatically.'
+          : 'Unable to load script details. Retry with Refresh now or return to the dashboard.';
+      } finally {
+        refreshing = false;
+        refreshButton.removeAttribute('aria-busy');
+        // Refresh the chart even when the summary endpoint is unavailable.
+        if (card) void refreshSeries(card);
+      }
+    }
+
+    darkMode.addEventListener('change', () => {
+      if (card) {
+        applyChartTheme(card.chart);
+        card.chart.update();
+      }
+    });
+    refreshButton.addEventListener('click', refreshDashboard);
+    void refreshDashboard();
+    setInterval(refreshDashboard, 30000);
+  </script>
+</body>
+</html>
