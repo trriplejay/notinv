@@ -500,7 +500,7 @@ func TestServicesRecordScriptRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	t.Cleanup(func() { _ = st.Close() })
 	logger := newLogger(&bytes.Buffer{}, "info", "text")
 	writer := rc.NewWriter(st, "test", logger, rc.Options{})
 	services := newServicesFor(logger, &config.Config{DiscordDryRun: true}, writer)(shutdownScript{})
@@ -508,7 +508,7 @@ func TestServicesRecordScriptRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	writer.Close() // Flushes buffered records.
 	requests, err := st.QueryRequests(t.Context(), "shutdown-test", time.Now().Add(-time.Minute), time.Now().Add(time.Minute))
 	if err != nil {
