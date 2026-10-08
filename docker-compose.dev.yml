@@ -1,0 +1,22 @@
+# Local development with hot reload: `make dev`.
+services:
+  notinv:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    env_file: .env
+    environment:
+      # Overrides .env: keep the database inside the container so it is
+      # discarded when the container is removed.
+      DATABASE_URL: file:/tmp/notinv.db
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/src
+      # Build caches only (no application data), so rebuilds stay fast.
+      - go-build-cache:/root/.cache/go-build
+      - go-mod-cache:/go/pkg/mod
+
+volumes:
+  go-build-cache:
+  go-mod-cache:

@@ -3,7 +3,7 @@ BIN_DIR := bin
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test lint fmt run clean ci vet fmt-check
+.PHONY: build test lint fmt run dev clean ci vet fmt-check
 
 build:
 	CGO_ENABLED=1 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) ./cmd/notinv
@@ -34,6 +34,10 @@ fmt:
 
 run: build
 	./$(BIN_DIR)/$(BINARY)
+
+# Hot-reloading dev container; the database is discarded when it exits.
+dev:
+	docker compose -f docker-compose.dev.yml run --rm --build --service-ports notinv
 
 clean:
 	rm -rf $(BIN_DIR)

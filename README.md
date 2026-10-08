@@ -255,6 +255,21 @@ nonroot user, and uncomment the `volumes:` block and that mount in
 container and is lost when the container is replaced. A remote libsql/Turso
 database stores data remotely and needs **no volume**; leave the block commented.
 
+### Hot reload (Docker)
+
+```sh
+make dev
+```
+
+Runs the service in a development container (`Dockerfile.dev`,
+`docker-compose.dev.yml`) with the repo mounted and [air](https://github.com/air-verse/air)
+watching it: saving a `.go` file or anything under `web/static` rebuilds and
+restarts the service. `.env` is loaded as usual, except `DATABASE_URL` is forced
+to `file:/tmp/notinv.db` inside the container, so the database is discarded when
+you stop `make dev` (Ctrl-C) and the container is removed. Only the Go build and
+module caches are kept in named volumes so rebuilds stay fast; remove them with
+`docker compose -f docker-compose.dev.yml down -v`.
+
 ## 7. Trigger your first Discord DM
 
 1. Make the endpoint in `WIDGET_STOCK_URL` return HTTP 200, then start notinv using
@@ -298,6 +313,7 @@ Requires Go 1.26+ and a C compiler for the CGO-enabled build. Linting requires
 ```sh
 make build   # build ./bin/notinv
 make run     # build and run (Ctrl-C to stop)
+make dev     # hot-reloading Docker container with a throwaway database
 make test    # go test -race ./...
 make lint    # golangci-lint run ./...
 make fmt     # format Go source with gofmt

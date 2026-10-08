@@ -1,0 +1,24 @@
+# Hot-reload config for `make dev` (see Dockerfile.dev).
+root = "."
+tmp_dir = "/tmp/air"
+
+[build]
+  cmd = "CGO_ENABLED=1 go build -o /tmp/air/notinv ./cmd/notinv"
+  bin = "/tmp/air/notinv"
+  include_ext = ["go", "html", "css", "js"]
+  exclude_dir = [".git", "assets", "bin", "data", "web/tests"]
+  exclude_regex = ["_test\\.go$"]
+  delay = 500
+  # Polling works on every Docker Desktop file-sharing backend.
+  poll = true
+  poll_interval = 500
+  # Let the service shut down gracefully before restarting.
+  send_interrupt = true
+  kill_delay = "2s"
+  stop_on_error = true
+
+[log]
+  time = true
+
+[misc]
+  clean_on_exit = true

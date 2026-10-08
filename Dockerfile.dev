@@ -1,0 +1,12 @@
+# Development image: rebuilds and restarts the service on source changes.
+# The repo is bind-mounted at /src by docker-compose.dev.yml.
+FROM golang:1.26-bookworm
+
+RUN go install github.com/air-verse/air@v1.61.7
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+EXPOSE 8080
+CMD ["air", "-c", ".air.toml"]
