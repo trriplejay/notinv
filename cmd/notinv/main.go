@@ -24,6 +24,7 @@ import (
 	"github.com/trriplejay/notinv/internal/store"
 	"github.com/trriplejay/notinv/internal/web"
 	"github.com/trriplejay/notinv/scripts/example"
+	"github.com/trriplejay/notinv/scripts/lunch"
 	"github.com/trriplejay/notinv/scripts/nintendo"
 	webassets "github.com/trriplejay/notinv/web"
 )
@@ -151,7 +152,7 @@ func run() error {
 
 // defaultScripts returns fresh instances of the scripts scheduled by the service.
 func defaultScripts() []runner.Script {
-	return []runner.Script{example.New(), nintendo.New()}
+	return []runner.Script{example.New(), nintendo.New(), lunch.New()}
 }
 
 func newLogger(w io.Writer, level, format string) *slog.Logger {

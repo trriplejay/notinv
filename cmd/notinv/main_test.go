@@ -26,17 +26,30 @@ import (
 	"github.com/trriplejay/notinv/internal/store"
 )
 
-// TestDefaultScripts verifies that the service's runnable set includes Nintendo.
+// TestDefaultScripts verifies that the service's runnable set includes the
+// example, Nintendo and lunch scripts with their schedules.
 func TestDefaultScripts(t *testing.T) {
+	want := map[string]string{
+		"example":  "",
+		"nintendo": "@every 1m",
+		"lunch":    "CRON_TZ=America/Los_Angeles 0 6 * * *",
+	}
+	seen := map[string]bool{}
 	for _, script := range defaultScripts() {
-		if script.Name() == "nintendo" {
-			if script.Schedule() != "@every 1m" {
-				t.Fatalf("nintendo schedule = %q, want @every 1m", script.Schedule())
-			}
-			return
+		schedule, ok := want[script.Name()]
+		if !ok {
+			continue
+		}
+		seen[script.Name()] = true
+		if schedule != "" && script.Schedule() != schedule {
+			t.Errorf("%s schedule = %q, want %q", script.Name(), script.Schedule(), schedule)
 		}
 	}
-	t.Fatal("nintendo is absent from the service's default scripts")
+	for name := range want {
+		if !seen[name] {
+			t.Errorf("%s is absent from the service's default scripts", name)
+		}
+	}
 }
 
 // CLM-11: an absent implicit .env must not change the environment.
