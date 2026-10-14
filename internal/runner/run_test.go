@@ -13,6 +13,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/robfig/cron/v3"
+
 	"github.com/trriplejay/notinv/internal/store"
 )
 
@@ -224,6 +226,61 @@ func TestRunCronSchedule(t *testing.T) {
 		recorded := runs.snapshot()
 		if len(recorded) != 2 || !recorded[1].OK {
 			t.Fatalf("cron schedule recorded %+v, want a second successful run", recorded)
+		}
+	})
+}
+
+const pacificSchedule = "CRON_TZ=America/Los_Angeles 0 6 * * *"
+
+// A CRON_TZ schedule fires at 06:00 Los Angeles wall time on both sides of a
+// DST change; dropping the prefix would yield 06:00Z in both seasons.
+func TestCronScheduleTimezone(t *testing.T) {
+	sched, err := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor).Parse(pacificSchedule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name  string
+		from  time.Time
+		wantZ string
+	}{
+		{"PST January", time.Date(2026, time.January, 15, 0, 0, 0, 0, time.UTC), "2026-01-15T14:00:00Z"},
+		{"PDT July", time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC), "2026-07-15T13:00:00Z"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sched.Next(tt.from).UTC().Format(time.RFC3339); got != tt.wantZ {
+				t.Errorf("Next(%v) = %s, want %s", tt.from, got, tt.wantZ)
+			}
+		})
+	}
+}
+
+// The real runner executes a CRON_TZ script at 06:00 Los Angeles time, not 06:00 UTC.
+func TestRunCronScheduleTimezone(t *testing.T) {
+	loc, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		runs := newFakeStore()
+		script := fakeScript{name: "pacific", schedule: pacificSchedule, run: func(context.Context, *Context) error {
+			return nil
+		}}
+		stop := startTestRunner(t, script, quietContext(), runs)
+		defer stop()
+		synctest.Wait()
+		if recorded := runs.snapshot(); len(recorded) != 1 {
+			t.Fatalf("startup recorded %+v, want one immediate run", recorded)
+		}
+		// Fire time is 06:00 LA the next morning; sleep past it, not to it.
+		time.Sleep(25 * time.Hour)
+		synctest.Wait()
+		recorded := runs.snapshot()
+		if len(recorded) != 2 || !recorded[1].OK {
+			t.Fatalf("recorded %+v, want a second successful run", recorded)
+		}
+		if h, m, s := recorded[1].StartedAt.In(loc).Clock(); h != 6 || m != 0 || s != 0 {
+			t.Errorf("second run at %v LA time, want 06:00:00", recorded[1].StartedAt.In(loc))
 		}
 	})
 }
