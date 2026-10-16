@@ -251,11 +251,13 @@ From the repo root, with Docker running:
 docker compose up
 ```
 
-The repository's `docker-compose.yml` defines the `notinv` service, builds from
-the local `Dockerfile`, loads `.env` through `env_file: .env`, and publishes
+The repository's `docker-compose.yml` defines the `notinv` service, pulls
+`trriplejay/notinv:latest` from Docker Hub (published by the Release workflow on
+every merge to `main`), loads `.env` through `env_file: .env`, and publishes
 `8080:8080` (host port 8080 to container port 8080). Keep `NOTINV_LISTEN=:8080`
-for that mapping, and open <http://localhost:8080>. After modifying script code
-or registration, use `docker compose up --build` to rebuild the image.
+for that mapping, and open <http://localhost:8080>. The image is built for
+`linux/amd64` only; on Apple Silicon, Docker runs it under emulation. To run
+local, unmerged script changes, use `make dev` (see below).
 
 For `DATABASE_URL=file:./data/notinv.db`, the Compose file includes a
 **commented-out** `./data:/app/data` volume. To keep the database across container
