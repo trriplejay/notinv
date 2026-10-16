@@ -88,6 +88,7 @@
     .card[data-state="failing"] { --state: var(--error); --state-soft: var(--error-soft); border-color: color-mix(in srgb, var(--error) 35%, var(--border)); }
     .card[data-state="idle"] { --state: var(--idle); --state-soft: var(--idle-soft); }
     .card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .card-actions { display: inline-flex; align-items: center; gap: 8px; flex: none; }
     .card-title { min-width: 0; }
     h2 { font-size: 16px; font-weight: 650; letter-spacing: -.01em; overflow-wrap: anywhere; }
     h2 a { color: inherit; text-decoration: none; }
@@ -164,7 +165,10 @@
         <div class="card-title">
           <h2><a></a></h2>
         </div>
-        <span class="badge"></span>
+        <div class="card-actions">
+          <button class="btn toggle-btn" type="button">Disable</button>
+          <span class="badge"></span>
+        </div>
       </div>
       <dl class="metrics">
         <div><dt title="Runs · last 7 days · OK / failing">Runs · 7d</dt><dd data-field="counts"></dd></div>
@@ -194,7 +198,27 @@
       const title = element.querySelector('h2 a');
       title.textContent = name;
       title.href = '/script.html?name=' + encodeURIComponent(name);
-      return { name, element };
+      const toggleBtn = element.querySelector('.toggle-btn');
+      toggleBtn.addEventListener('click', async () => {
+        if (toggleBtn.disabled) return;
+        const targetEnabled = toggleBtn.textContent.trim() === 'Enable';
+        toggleBtn.disabled = true;
+        try {
+          const res = await fetch('/api/scripts/' + encodeURIComponent(name) + '/enabled', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: targetEnabled }),
+            cache: 'no-store'
+          });
+          if (!res.ok) throw new Error(`Request failed (${res.status})`);
+          await refreshDashboard();
+        } catch (error) {
+          status.textContent = `${error.message}. Failed to update script state.`;
+        } finally {
+          toggleBtn.disabled = false;
+        }
+      });
+      return { name, element, toggleBtn };
     }
 
     function uptimeTone(uptime) {
@@ -216,6 +240,10 @@
       card.element.dataset.state = state;
       const badge = card.element.querySelector('.badge');
       badge.textContent = { ok: 'OK', failing: 'Failing', idle: 'No runs yet' }[state];
+      if (card.toggleBtn) {
+        card.toggleBtn.textContent = script.enabled ? 'Disable' : 'Enable';
+      }
+      card.element.dataset.enabled = String(script.enabled);
     }
 
     function updateSummary(scripts) {

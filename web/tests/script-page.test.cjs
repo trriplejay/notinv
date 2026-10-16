@@ -74,6 +74,51 @@ test('script pages and slim cards with the real Go API and SQLite', async t => {
       assert.equal(new URL(page.url()).pathname, '/');
     }
   });
+
+  await t.test('cross-page enable and disable updates state across landing cards and script details', async () => {
+    // Navigate to landing page /
+    await page.goto(baseURL);
+    const card = page.locator('.card').filter({ has: page.getByRole('heading', { name: scriptName, exact: true }) });
+    const cardToggle = card.locator('.toggle-btn');
+    await cardToggle.waitFor({ state: 'visible' });
+    assert.equal(await cardToggle.textContent(), 'Disable');
+
+    // Click Disable on card, wait for label to become Enable
+    await cardToggle.click();
+    await page.waitForFunction(name => {
+      const el = [...document.querySelectorAll('.card')].find(c => c.querySelector('h2 a')?.textContent === name);
+      return el?.querySelector('.toggle-btn')?.textContent === 'Enable';
+    }, scriptName);
+    assert.equal(await cardToggle.textContent(), 'Enable');
+
+    // Verify /api/scripts reports enabled:false
+    let res = await (await page.request.get(`${baseURL}/api/scripts`)).json();
+    let scriptState = res.find(s => s.name === scriptName);
+    assert.equal(scriptState?.enabled, false);
+
+    // Navigate to script page /script.html?name=<encoded name>
+    await page.goto(`${baseURL}/script.html?name=${encodeURIComponent(scriptName)}`);
+    const scriptToggle = page.locator('#toggle');
+    await scriptToggle.waitFor({ state: 'visible' });
+    assert.equal(await scriptToggle.textContent(), 'Enable');
+
+    // Click Enable on script page, wait for label to become Disable
+    await scriptToggle.click();
+    await page.waitForFunction(() => document.querySelector('#toggle')?.textContent === 'Disable');
+    assert.equal(await scriptToggle.textContent(), 'Disable');
+
+    // Verify /api/scripts reports enabled:true
+    res = await (await page.request.get(`${baseURL}/api/scripts`)).json();
+    scriptState = res.find(s => s.name === scriptName);
+    assert.equal(scriptState?.enabled, true);
+
+    // Navigate back to / and assert card button reads Disable
+    await page.goto(baseURL);
+    const restoredCard = page.locator('.card').filter({ has: page.getByRole('heading', { name: scriptName, exact: true }) });
+    const restoredToggle = restoredCard.locator('.toggle-btn');
+    await restoredToggle.waitFor({ state: 'visible' });
+    assert.equal(await restoredToggle.textContent(), 'Disable');
+  });
   assert.deepEqual(errors, []);
 });
 

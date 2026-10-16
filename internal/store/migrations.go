@@ -31,6 +31,12 @@ var migrations = []struct {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_runs_script_started ON runs(script, started_at)`,
 	}},
+	{2, []string{
+		`CREATE TABLE script_state (
+			script TEXT PRIMARY KEY,
+			enabled INTEGER NOT NULL
+		)`,
+	}},
 }
 
 func (s *Store) migrate(ctx context.Context) error {

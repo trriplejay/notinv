@@ -49,9 +49,11 @@ func NewContext(log *slog.Logger, httpClient *http.Client, cfg *config.Config) *
 	return rc
 }
 
-// RunStore persists the outcome of each completed script run.
+// RunStore persists the outcome of each completed script run and reports
+// whether a script is currently enabled.
 type RunStore interface {
 	InsertRun(ctx context.Context, run storepkg.Run) error
+	ScriptEnabled(ctx context.Context, script string) (bool, error)
 }
 
 // Run schedules one script, executing and recording its runs sequentially.
@@ -81,6 +83,18 @@ func Run(ctx context.Context, script Script, rc *Context, store RunStore) error 
 		// Prefer shutdown if the timer and cancellation became ready together.
 		if ctx.Err() != nil {
 			return nil
+		}
+
+		enabled, err := store.ScriptEnabled(ctx, script.Name())
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			rc.Log.ErrorContext(ctx, "check script enabled failed", slog.String("script", script.Name()), slog.Any("error", err))
+			continue
+		}
+		if !enabled {
+			continue
 		}
 
 		rc.Log.InfoContext(ctx, "run start", slog.String("script", script.Name()))

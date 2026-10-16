@@ -307,9 +307,101 @@ func TestMigrationIdempotency(t *testing.T) {
 	if err := second.db.QueryRowContext(ctx, `SELECT count(*), min(version), min(applied_at) FROM schema_migrations`).Scan(&count, &version, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if after != schemaVersion || count != 1 || version != 1 || applied != 123 {
+	if after != schemaVersion || count != len(migrations) || version != 1 || applied != 123 {
 		t.Fatalf("migration changed: schema %d -> %d, count=%d version=%d applied=%d", schemaVersion, after, count, version, applied)
 	}
+}
+
+func TestMigrationV1ToV2(t *testing.T) {
+	ctx := t.Context()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	dsn := "file:" + dbPath
+
+	rawDB, err := sql.Open("libsql", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.ExecContext(ctx, `CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.ExecContext(ctx, `INSERT INTO schema_migrations (version, applied_at) VALUES (1, 1000)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range migrations[0].sql {
+		if _, err := rawDB.ExecContext(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().Truncate(time.Millisecond)
+	errText := "some error"
+	seedRuns := []Run{
+		{Script: "test-script-1", StartedAt: now, DurationMs: 120, OK: true},
+		{Script: "test-script-2", StartedAt: now.Add(-time.Hour), DurationMs: 450, OK: false, Err: &errText},
+	}
+	for _, r := range seedRuns {
+		ok := 0
+		if r.OK {
+			ok = 1
+		}
+		if _, err := rawDB.ExecContext(ctx, `INSERT INTO runs (script, started_at, duration_ms, ok, error) VALUES (?, ?, ?, ?, ?)`,
+			r.Script, r.StartedAt.UnixMilli(), r.DurationMs, ok, r.Err); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := rawDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(ctx, dsn, "")
+	if err != nil {
+		t.Fatalf("first Open failed: %v", err)
+	}
+
+	var hasV2 int
+	if err := st.db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version = 2`).Scan(&hasV2); err != nil {
+		t.Fatal(err)
+	}
+	if hasV2 != 1 {
+		t.Fatalf("schema_migrations missing version 2: count=%d", hasV2)
+	}
+
+	var stateTableCount int
+	if err := st.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='script_state'`).Scan(&stateTableCount); err != nil {
+		t.Fatal(err)
+	}
+	if stateTableCount != 1 {
+		t.Fatalf("script_state table does not exist: count=%d", stateTableCount)
+	}
+
+	runs, err := st.QueryRuns(ctx, "test-script-1", now.Add(-time.Minute), now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Script != seedRuns[0].Script || runs[0].DurationMs != seedRuns[0].DurationMs || !runs[0].OK {
+		t.Fatalf("runs rows changed or missing: got %+v", runs)
+	}
+
+	failingRuns, err := st.QueryRuns(ctx, "test-script-2", now.Add(-2*time.Hour), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failingRuns) != 1 || failingRuns[0].Script != seedRuns[1].Script || failingRuns[0].OK || failingRuns[0].Err == nil || *failingRuns[0].Err != "some error" {
+		t.Fatalf("failing runs rows changed or missing: got %+v", failingRuns)
+	}
+
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := Open(ctx, dsn, "")
+	if err != nil {
+		t.Fatalf("second Open failed: %v", err)
+	}
+	defer func() {
+		if err := second.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 }
 
 func TestBatchRollback(t *testing.T) {
@@ -442,5 +534,74 @@ func TestPrivateErrorsPreserveCause(t *testing.T) {
 	var urlErr *url.Error
 	if !errors.As(err, &urlErr) || urlErr != cause {
 		t.Fatal("typed cause lost")
+	}
+}
+
+func TestScriptEnabled(t *testing.T) {
+	ctx := t.Context()
+	dsn := "file:" + filepath.Join(t.TempDir(), "state.db")
+	s, err := Open(ctx, dsn, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	at := time.UnixMilli(1_700_000_000_000)
+	if err := s.InsertRun(ctx, Run{Script: "a", StartedAt: at, DurationMs: 5, OK: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertRequests(ctx, []Request{{Script: "a", Method: "GET", URL: "https://example.test/", StartedAt: at, DurationMs: 3, StatusCode: 200}}); err != nil {
+		t.Fatal(err)
+	}
+	counts := func(st *Store) (int, int) {
+		t.Helper()
+		var runs, reqs int
+		if err := st.db.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE script = 'a'`).Scan(&runs); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.db.QueryRowContext(ctx, `SELECT count(*) FROM requests WHERE script = 'a'`).Scan(&reqs); err != nil {
+			t.Fatal(err)
+		}
+		return runs, reqs
+	}
+	wantRuns, wantReqs := counts(s)
+	if wantRuns != 1 || wantReqs != 1 {
+		t.Fatalf("setup counts runs=%d requests=%d", wantRuns, wantReqs)
+	}
+	expect := func(st *Store, script string, want bool, when string) {
+		t.Helper()
+		got, err := st.ScriptEnabled(ctx, script)
+		if err != nil {
+			t.Fatalf("%s: %v", when, err)
+		}
+		if got != want {
+			t.Fatalf("%s: %s enabled=%v, want %v", when, script, got, want)
+		}
+	}
+	expect(s, "a", true, "never set")
+
+	if err := s.SetScriptEnabled(ctx, "a", false); err != nil {
+		t.Fatal(err)
+	}
+	expect(s, "a", false, "after disable")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = Open(ctx, dsn, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	expect(s, "a", false, "after reopen")
+	expect(s, "b", true, "other script unaffected")
+
+	if err := s.SetScriptEnabled(ctx, "a", true); err != nil {
+		t.Fatal(err)
+	}
+	expect(s, "a", true, "after re-enable")
+
+	if runs, reqs := counts(s); runs != wantRuns || reqs != wantReqs {
+		t.Fatalf("counts changed: runs=%d requests=%d, want %d and %d", runs, reqs, wantRuns, wantReqs)
 	}
 }

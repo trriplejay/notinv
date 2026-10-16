@@ -37,10 +37,16 @@ type fakeStore struct {
 	runs     []store.Run
 	inserted chan struct{}
 	err      error
+	enabled  map[string]bool
+	stateErr map[string]error
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{inserted: make(chan struct{}, 16)}
+	return &fakeStore{
+		inserted: make(chan struct{}, 16),
+		enabled:  make(map[string]bool),
+		stateErr: make(map[string]error),
+	}
 }
 
 func (s *fakeStore) InsertRun(_ context.Context, run store.Run) error {
@@ -52,6 +58,48 @@ func (s *fakeStore) InsertRun(_ context.Context, run store.Run) error {
 	default:
 	}
 	return s.err
+}
+
+func (s *fakeStore) ScriptEnabled(_ context.Context, script string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stateErr != nil {
+		if err, ok := s.stateErr[script]; ok {
+			return false, err
+		}
+	}
+	if s.enabled != nil {
+		if en, ok := s.enabled[script]; ok {
+			return en, nil
+		}
+	}
+	return true, nil
+}
+
+func (s *fakeStore) setEnabled(script string, enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.enabled == nil {
+		s.enabled = make(map[string]bool)
+	}
+	s.enabled[script] = enabled
+}
+
+func (s *fakeStore) setStateErr(script string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stateErr == nil {
+		s.stateErr = make(map[string]error)
+	}
+	s.stateErr[script] = err
+}
+
+func (s *fakeStore) clearStateErr(script string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stateErr != nil {
+		delete(s.stateErr, script)
+	}
 }
 
 func (s *fakeStore) snapshot() []store.Run {
@@ -428,6 +476,250 @@ func TestRunContinuesAfterStoreError(t *testing.T) {
 		stop()
 		if strings.Count(buf.String(), `msg="insert run failed" script=store-error error="storage unavailable"`) < 2 {
 			t.Errorf("store errors were not logged for each run: %s", buf.String())
+		}
+	})
+}
+
+// CLM-3: disabled scripts do not run at startup or on scheduled cron ticks,
+// and other concurrently running scripts are unaffected.
+func TestRunDisabledGate(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		runs := newFakeStore()
+		runs.setEnabled("scriptA", false)
+		runs.setEnabled("scriptB", true)
+
+		var callsA, callsB atomic.Int32
+		scriptA := fakeScript{name: "scriptA", schedule: "* * * * *", run: func(context.Context, *Context) error {
+			callsA.Add(1)
+			return nil
+		}}
+		scriptB := fakeScript{name: "scriptB", schedule: "* * * * *", run: func(context.Context, *Context) error {
+			callsB.Add(1)
+			return nil
+		}}
+
+		stopA := startTestRunner(t, scriptA, quietContext(), runs)
+		defer stopA()
+		stopB := startTestRunner(t, scriptB, quietContext(), runs)
+		defer stopB()
+
+		// Immediate startup run for B; A must be skipped immediately.
+		synctest.Wait()
+		if callsA.Load() != 0 {
+			t.Fatalf("startup: scriptA calls = %d, want 0", callsA.Load())
+		}
+		if callsB.Load() != 1 {
+			t.Fatalf("startup: scriptB calls = %d, want 1", callsB.Load())
+		}
+
+		// Advance across several cron ticks.
+		for tick := 1; tick <= 3; tick++ {
+			time.Sleep(time.Minute)
+			synctest.Wait()
+			if callsA.Load() != 0 {
+				t.Fatalf("tick %d: scriptA calls = %d, want 0", tick, callsA.Load())
+			}
+			if callsB.Load() != int32(1+tick) {
+				t.Fatalf("tick %d: scriptB calls = %d, want %d", tick, callsB.Load(), 1+tick)
+			}
+		}
+
+		stopA()
+		stopB()
+
+		// Verify recorded runs: none for scriptA, exactly 4 successful runs for scriptB.
+		recorded := runs.snapshot()
+		if len(recorded) != 4 {
+			t.Fatalf("recorded runs = %+v, want 4 runs for scriptB only", recorded)
+		}
+		for _, r := range recorded {
+			if r.Script != "scriptB" || !r.OK {
+				t.Errorf("unexpected run record: %+v", r)
+			}
+		}
+	})
+}
+
+// CLM-4: disabling mid-flight does not cancel the in-progress run; re-enabling
+// between ticks waits for the next scheduled fire rather than firing immediately.
+func TestRunDisabledMidFlightAndReEnabled(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		runs := newFakeStore()
+		inRun := make(chan struct{})
+		release := make(chan struct{})
+		var calls atomic.Int32
+
+		script := fakeScript{name: "flight", schedule: "* * * * *", run: func(ctx context.Context, rc *Context) error {
+			calls.Add(1)
+			if calls.Load() == 1 {
+				close(inRun)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-release:
+					return nil
+				}
+			}
+			return nil
+		}}
+
+		stop := startTestRunner(t, script, quietContext(), runs)
+		defer stop()
+
+		// Wait until first run is blocked inside script.Run.
+		<-inRun
+
+		// Flip store state to disabled while the run is in flight.
+		runs.setEnabled("flight", false)
+
+		// Release the blocked run; it must complete successfully and record its run row.
+		close(release)
+		synctest.Wait()
+
+		recorded := runs.snapshot()
+		if len(recorded) != 1 || recorded[0].Script != "flight" || !recorded[0].OK {
+			t.Fatalf("completed in-flight run was not recorded: %+v", recorded)
+		}
+		if calls.Load() != 1 {
+			t.Fatalf("calls = %d, want 1", calls.Load())
+		}
+
+		// Re-enable the script between ticks.
+		runs.setEnabled("flight", true)
+
+		// Advance time partially (30s): still before the next cron minute boundary.
+		// Re-enabling must NOT trigger an immediate run.
+		time.Sleep(30 * time.Second)
+		synctest.Wait()
+
+		if calls.Load() != 1 {
+			t.Fatalf("script ran before scheduled cron time: calls = %d, want 1", calls.Load())
+		}
+		if len(runs.snapshot()) != 1 {
+			t.Fatalf("extra run recorded before cron time: %+v", runs.snapshot())
+		}
+
+		// Advance past the next cron boundary (35s more -> 65s total).
+		// Exactly one run must occur at the cron tick.
+		time.Sleep(35 * time.Second)
+		synctest.Wait()
+
+		if calls.Load() != 2 {
+			t.Fatalf("calls after cron boundary = %d, want 2", calls.Load())
+		}
+		recorded = runs.snapshot()
+		if len(recorded) != 2 || !recorded[1].OK {
+			t.Fatalf("runs after cron boundary = %+v, want 2 OK runs", recorded)
+		}
+
+		stop()
+	})
+}
+
+// CLM-4: a script disabled at tick N skips tick N; re-enabling before tick N+1
+// fires exactly at tick N+1 (single-wait rather than double-wait).
+func TestRunDisabledAtTickAndReEnabledBeforeNextTick(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		runs := newFakeStore()
+		var calls atomic.Int32
+		script := fakeScript{name: "re-enable", schedule: "* * * * *", run: func(context.Context, *Context) error {
+			calls.Add(1)
+			return nil
+		}}
+
+		stop := startTestRunner(t, script, quietContext(), runs)
+		defer stop()
+
+		// Immediate startup run (tick 0).
+		synctest.Wait()
+		if calls.Load() != 1 {
+			t.Fatalf("startup: calls = %d, want 1", calls.Load())
+		}
+
+		// Disable the script after startup, before tick 1.
+		runs.setEnabled("re-enable", false)
+
+		// Advance to tick 1 (1 minute).
+		time.Sleep(time.Minute)
+		synctest.Wait()
+
+		// Tick 1 passed: script was disabled, so no run occurred.
+		if calls.Load() != 1 {
+			t.Fatalf("tick 1: calls = %d, want 1 (disabled)", calls.Load())
+		}
+
+		// Re-enable the script before tick 2 (after 30s into period 1->2).
+		time.Sleep(30 * time.Second)
+		synctest.Wait()
+		runs.setEnabled("re-enable", true)
+
+		// Advance another 15s (total 45s into period): still before tick 2.
+		time.Sleep(15 * time.Second)
+		synctest.Wait()
+		if calls.Load() != 1 {
+			t.Fatalf("before tick 2: calls = %d, want 1 (re-enabling must not trigger immediate run)", calls.Load())
+		}
+
+		// Advance 20s (total 65s from tick 1, past tick 2 boundary at 60s).
+		time.Sleep(20 * time.Second)
+		synctest.Wait()
+
+		// Exactly one run should have occurred at tick 2.
+		if calls.Load() != 2 {
+			t.Fatalf("at tick 2: calls = %d, want 2 (missed tick 2 due to extra wait)", calls.Load())
+		}
+
+		recorded := runs.snapshot()
+		if len(recorded) != 2 {
+			t.Fatalf("recorded runs = %+v, want 2", recorded)
+		}
+	})
+}
+
+// CLM-3 / builder requirement: lookup error fails closed: skips run and logs error.
+func TestRunSkipsWhenScriptEnabledFails(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var buf bytes.Buffer
+		rc := &Context{Log: slog.New(slog.NewTextHandler(&buf, nil))}
+		runs := newFakeStore()
+		runs.setStateErr("lookup-fail", errors.New("state db unavailable"))
+
+		var calls atomic.Int32
+		script := fakeScript{name: "lookup-fail", schedule: "@every 1s", run: func(context.Context, *Context) error {
+			calls.Add(1)
+			return nil
+		}}
+
+		stop := startTestRunner(t, script, rc, runs)
+		defer stop()
+
+		// Advance across startup and several ticks; error must cause run to be skipped.
+		synctest.Wait()
+		for i := 0; i < 3; i++ {
+			time.Sleep(time.Second)
+			synctest.Wait()
+		}
+
+		if n := calls.Load(); n != 0 {
+			t.Fatalf("script ran %d times when state lookup failed, want 0", n)
+		}
+		if len(runs.snapshot()) != 0 {
+			t.Fatalf("recorded runs = %+v, want 0", runs.snapshot())
+		}
+		if !strings.Contains(buf.String(), `msg="check script enabled failed" script=lookup-fail error="state db unavailable"`) {
+			t.Errorf("missing error log for state lookup failure: %s", buf.String())
+		}
+
+		// Clear error; next tick should run normally.
+		runs.clearStateErr("lookup-fail")
+		time.Sleep(time.Second)
+		synctest.Wait()
+
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("script calls after recovery = %d, want 1", n)
+		}
+		if len(runs.snapshot()) != 1 {
+			t.Fatalf("recorded runs after recovery = %+v, want 1", runs.snapshot())
 		}
 	})
 }

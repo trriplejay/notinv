@@ -335,11 +335,19 @@ func staticServices(services *runner.Context) func(runner.Script) *runner.Contex
 }
 
 type shutdownRunStore struct {
-	insert func(context.Context, store.Run) error
+	insert  func(context.Context, store.Run) error
+	enabled func(context.Context, string) (bool, error)
 }
 
 func (s shutdownRunStore) InsertRun(ctx context.Context, run store.Run) error {
 	return s.insert(ctx, run)
+}
+
+func (s shutdownRunStore) ScriptEnabled(ctx context.Context, script string) (bool, error) {
+	if s.enabled != nil {
+		return s.enabled(ctx, script)
+	}
+	return true, nil
 }
 
 // CLM-1, CLM-2, CLM-6: exercise the production scheduling/context adapter,
@@ -530,4 +538,49 @@ func TestServicesRecordScriptRequests(t *testing.T) {
 	if len(requests) != 1 || requests[0].URL != server.URL || requests[0].StatusCode != http.StatusTeapot {
 		t.Fatalf("recorded requests = %+v, want one GET of %s with status 418", requests, server.URL)
 	}
+}
+
+// CLM-3: drainingStore forwards ScriptEnabled to runner.Run so disabled scripts do not fire at startup.
+func TestStartRunnersDisabledScript(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var output bytes.Buffer
+		logger := newLogger(&output, "debug", "text")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var calls atomic.Int32
+		var insertCalls atomic.Int32
+		script := shutdownScript{run: func(context.Context) error {
+			calls.Add(1)
+			return nil
+		}}
+		st := shutdownRunStore{
+			insert: func(context.Context, store.Run) error {
+				insertCalls.Add(1)
+				return nil
+			},
+			enabled: func(_ context.Context, name string) (bool, error) {
+				return false, nil
+			},
+		}
+		cancelRuns, done := startRunners(ctx, []runner.Script{script}, staticServices(&runner.Context{Log: logger}), st)
+		defer cancelRuns()
+
+		// Advance fake time across startup and several cron ticks.
+		synctest.Wait()
+		for i := 0; i < 3; i++ {
+			time.Sleep(time.Second)
+			synctest.Wait()
+		}
+
+		if n := calls.Load(); n != 0 {
+			t.Fatalf("disabled script ran %d times, want 0", n)
+		}
+		if n := insertCalls.Load(); n != 0 {
+			t.Fatalf("disabled script inserted %d runs, want 0", n)
+		}
+
+		// Cancel ctx to trigger runner shutdown and wait for runners to drain.
+		cancel()
+		<-done
+	})
 }

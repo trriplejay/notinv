@@ -205,6 +205,10 @@ func (s drainingStore) InsertRun(_ context.Context, run store.Run) error {
 	return s.RunStore.InsertRun(s.ctx, run)
 }
 
+func (s drainingStore) ScriptEnabled(ctx context.Context, script string) (bool, error) {
+	return s.RunStore.ScriptEnabled(ctx, script)
+}
+
 func startRunners(ctx context.Context, scripts []runner.Script, servicesFor func(runner.Script) *runner.Context, st runner.RunStore) (context.CancelFunc, <-chan struct{}) {
 	runCtx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
@@ -266,6 +270,7 @@ func newMux(st *store.Store, schedules map[string]string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("GET /", webassets.Handler())
 	mux.Handle("GET /api/scripts", web.NewScriptsHandler(st, schedules, nil))
+	mux.Handle("POST /api/scripts/{name}/enabled", web.NewScriptEnabledHandler(st, schedules))
 	mux.Handle("GET /api/scripts/{name}/runs", web.NewRunsHandler(st, nil))
 	mux.Handle("GET /api/scripts/{name}/requests", web.NewRequestsHandler(st, nil))
 	mux.Handle("GET /api/scripts/{name}/requests/series", web.NewSeriesHandler(st, nil))

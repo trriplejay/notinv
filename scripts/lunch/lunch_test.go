@@ -235,6 +235,10 @@ func (f *fakeRunStore) InsertRun(_ context.Context, run store.Run) error {
 	return nil
 }
 
+func (f *fakeRunStore) ScriptEnabled(_ context.Context, _ string) (bool, error) {
+	return true, nil
+}
+
 func (f *fakeRunStore) snapshot() []store.Run {
 	f.mu.Lock()
 	defer f.mu.Unlock()
