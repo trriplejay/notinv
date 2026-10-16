@@ -31,7 +31,6 @@ func fixedNow() time.Time { return testNow }
 type fakeStore struct {
 	runs        []store.Run
 	requests    []store.Request
-	listErr     error
 	latestErr   error
 	runsErr     error
 	requestsErr error
@@ -41,23 +40,6 @@ type fakeStore struct {
 	script      string
 	since       time.Time
 	until       time.Time
-}
-
-func (f *fakeStore) ListScripts(ctx context.Context) ([]string, error) {
-	f.ctx = ctx
-	names := make(map[string]bool)
-	for _, run := range f.runs {
-		names[run.Script] = true
-	}
-	for _, request := range f.requests {
-		names[request.Script] = true
-	}
-	var out []string
-	for name := range names {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out, f.listErr
 }
 
 func (f *fakeStore) LatestRun(ctx context.Context, script string) (*store.Run, error) {
@@ -169,7 +151,7 @@ func TestScriptsSummary(t *testing.T) {
 		{Script: "alpha", StartedAt: testNow, Err: &failure},
 		{Script: "beta", StartedAt: testNow, OK: true},
 	}}
-	w := serve(t, "GET /api/scripts", "/api/scripts", NewScriptsHandler(f, nil, fixedNow))
+	w := serve(t, "GET /api/scripts", "/api/scripts", NewScriptsHandler(f, map[string]string{"alpha": "", "beta": ""}, fixedNow))
 	assertJSON(t, w, `[
 		{"name":"alpha","latest":{"time":"2026-10-05T12:00:00Z","ok":false,"error":"check failed"},"uptime":0.6666666666666666,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":2,"failedRuns":1},
 		{"name":"beta","latest":{"time":"2026-10-05T12:00:00Z","ok":true,"error":null},"uptime":1,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":1,"failedRuns":0}
@@ -180,7 +162,7 @@ func TestScriptsSummary(t *testing.T) {
 // CLM-3: a request-only script must not disappear or divide by zero.
 func TestScriptsWithoutRuns(t *testing.T) {
 	f := &fakeStore{requests: []store.Request{{Script: "request-only", StartedAt: testNow, URL: "https://example.com"}}}
-	w := serve(t, "GET /api/scripts", "/api/scripts", NewScriptsHandler(f, nil, fixedNow))
+	w := serve(t, "GET /api/scripts", "/api/scripts", NewScriptsHandler(f, map[string]string{"request-only": ""}, fixedNow))
 	// JSON parsing rejects NaN/Infinity; exact equality also distinguishes null/absent.
 	assertJSON(t, w, `[{"name":"request-only","latest":null,"uptime":0,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0}]`)
 }
@@ -212,7 +194,7 @@ func TestScriptsLatencies(t *testing.T) {
 				f.requests = append(f.requests, store.Request{Script: "alpha", URL: fmt.Sprintf("url-%d", i%2), StartedAt: startedAt, DurationMs: latency})
 			}
 			// A since parameter must not override the summary card's fixed window.
-			w := serve(t, "GET /api/scripts", "/api/scripts?since=2026-10-05T12:00:00Z", NewScriptsHandler(f, nil, fixedNow))
+			w := serve(t, "GET /api/scripts", "/api/scripts?since=2026-10-05T12:00:00Z", NewScriptsHandler(f, map[string]string{"alpha": "", "beta": ""}, fixedNow))
 			assertJSON(t, w, fmt.Sprintf(`[
 				{"name":"alpha","latest":null,"uptime":0,"schedule":"","avgLatency":%g,"p95Latency":%g,"okRuns":0,"failedRuns":0},
 				{"name":"beta","latest":null,"uptime":0,"schedule":"","avgLatency":23,"p95Latency":23,"okRuns":0,"failedRuns":0}
@@ -222,6 +204,9 @@ func TestScriptsLatencies(t *testing.T) {
 	}
 }
 
+// Only registered scripts are listed: recorded history for an unregistered
+// script ("missing") is omitted, and a registered script without history
+// ("unused") still appears.
 func TestScriptsSchedules(t *testing.T) {
 	f := &fakeStore{requests: []store.Request{
 		{Script: "alpha", StartedAt: testNow},
@@ -233,7 +218,6 @@ func TestScriptsSchedules(t *testing.T) {
 	assertJSON(t, w, `[
 		{"name":"alpha","latest":null,"uptime":0,"schedule":"@every 5m","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0},
 		{"name":"beta","latest":null,"uptime":0,"schedule":"0 * * * *","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0},
-		{"name":"missing","latest":null,"uptime":0,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0},
 		{"name":"unused","latest":null,"uptime":0,"schedule":"@daily","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0}
 	]`)
 }
@@ -415,14 +399,12 @@ func TestInvalidSince(t *testing.T) {
 
 func TestStoreFailures(t *testing.T) {
 	failure := errors.New("private database detail")
-	for _, operation := range []string{"list", "latest", "script-runs", "script-requests", "runs", "requests", "series"} {
+	for _, operation := range []string{"latest", "script-runs", "script-requests", "runs", "requests", "series"} {
 		t.Run(operation, func(t *testing.T) {
 			f := &fakeStore{runs: []store.Run{{Script: "alpha", StartedAt: testNow}}}
 			pattern, target := "GET /api/scripts", "/api/scripts"
-			h := NewScriptsHandler(f, nil, fixedNow)
+			h := NewScriptsHandler(f, map[string]string{"alpha": ""}, fixedNow)
 			switch operation {
-			case "list":
-				f.listErr = failure
 			case "latest":
 				f.latestErr = failure
 			case "script-runs":
@@ -454,7 +436,7 @@ func TestDefaultClock(t *testing.T) {
 	for _, kind := range []string{"scripts", "runs", "requests", "requests/series"} {
 		f := &fakeStore{runs: []store.Run{{Script: "alpha", StartedAt: testNow}}}
 		pattern, target := "GET /api/scripts", "/api/scripts"
-		h := NewScriptsHandler(f, nil, nil)
+		h := NewScriptsHandler(f, map[string]string{"alpha": ""}, nil)
 		if kind != "scripts" {
 			pattern, target = "GET /api/scripts/{name}/"+kind, "/api/scripts/alpha/"+kind
 			h = NewRunsHandler(f, nil)
