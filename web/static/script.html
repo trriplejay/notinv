@@ -181,6 +181,7 @@
     const toggleButton = document.getElementById('toggle');
     const lineColors = ['#6366f1', '#0ea5e9', '#f59e0b', '#14b8a6', '#ec4899', '#84cc16'];
     let refreshing = false;
+    let refreshQueued = false;
 
     function pointColor(point) {
       if (point.error !== null || point.status < 100 || point.status >= 600) return '#c26bf3';
@@ -376,7 +377,10 @@
     }
 
     async function refreshDashboard() {
-      if (refreshing) return;
+      if (refreshing) {
+        refreshQueued = true;
+        return;
+      }
       if (name === null) {
         showNotFound();
         return;
@@ -406,6 +410,10 @@
         refreshButton.removeAttribute('aria-busy');
         // Refresh the chart even when the summary endpoint is unavailable.
         if (card) void refreshSeries(card);
+        if (refreshQueued) {
+          refreshQueued = false;
+          void refreshDashboard();
+        }
       }
     }
 
@@ -427,6 +435,9 @@
           cache: 'no-store'
         });
         if (!res.ok) throw new Error(`Request failed (${res.status})`);
+        const data = await res.json();
+        toggleButton.textContent = data.enabled ? 'Disable' : 'Enable';
+        if (card) card.element.dataset.enabled = String(data.enabled);
         await refreshDashboard();
       } catch (error) {
         status.textContent = `${error.message}. Failed to update script state.`;
