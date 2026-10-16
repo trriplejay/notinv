@@ -709,18 +709,57 @@ func TestRunDisabledAtTickAndReEnabledBeforeNextTick(t *testing.T) {
 	})
 }
 
-// Governor ruling: lookup error fails open: logs warning and runs script as usual.
-// TestRunSkipsWhenScriptEnabledFails asserts that runner.Run fails open when the
-// script enabled lookup fails (runs the script and inserts run rows, first iteration included).
-func TestRunSkipsWhenScriptEnabledFails(t *testing.T) {
-	testRunFailsOpenWhenScriptEnabledFails(t)
+// Governor ruling: remember last known state on read error.
+// If the script was previously read as disabled and a subsequent read fails,
+// it remains disabled and skips execution while logging a warning.
+func TestRunSkipsWhenDisabledAndScriptEnabledFails(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var buf bytes.Buffer
+		rc := &Context{Log: slog.New(slog.NewTextHandler(&buf, nil))}
+		runs := newFakeStore()
+
+		var calls atomic.Int32
+		script := fakeScript{name: "disabled-then-fail", schedule: "@every 1s", run: func(context.Context, *Context) error {
+			calls.Add(1)
+			return nil
+		}}
+
+		// Initial state is disabled: successful read returns disabled.
+		runs.setEnabled("disabled-then-fail", false)
+
+		stop := startTestRunner(t, script, rc, runs)
+		defer stop()
+
+		// Startup check (tick 0): read succeeds, returns disabled -> skipped.
+		synctest.Wait()
+		if n := calls.Load(); n != 0 {
+			t.Fatalf("startup: script ran %d times while disabled, want 0", n)
+		}
+
+		// Subsequent read now fails with an error (e.g. database down).
+		runs.setStateErr("disabled-then-fail", errors.New("state db unavailable"))
+
+		// Advance 2 ticks. Each tick should log WARN, remember it was disabled, and skip.
+		for i := 0; i < 2; i++ {
+			time.Sleep(time.Second)
+			synctest.Wait()
+		}
+
+		if n := calls.Load(); n != 0 {
+			t.Fatalf("script ran %d times after read failed when previously disabled, want 0", n)
+		}
+		recorded := runs.snapshot()
+		if len(recorded) != 0 {
+			t.Fatalf("recorded runs = %+v, want 0", recorded)
+		}
+		if !strings.Contains(buf.String(), `level=WARN msg="check script enabled failed" script=disabled-then-fail error="state db unavailable"`) {
+			t.Errorf("missing warn log for state lookup failure: %s", buf.String())
+		}
+	})
 }
 
+// When no prior read has succeeded (e.g. startup read fails), runner fails open.
 func TestRunFailsOpenWhenScriptEnabledFails(t *testing.T) {
-	testRunFailsOpenWhenScriptEnabledFails(t)
-}
-
-func testRunFailsOpenWhenScriptEnabledFails(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var buf bytes.Buffer
 		rc := &Context{Log: slog.New(slog.NewTextHandler(&buf, nil))}
@@ -744,7 +783,7 @@ func testRunFailsOpenWhenScriptEnabledFails(t *testing.T) {
 		}
 
 		if n := calls.Load(); n != 3 {
-			t.Fatalf("script ran %d times when state lookup failed, want 3", n)
+			t.Fatalf("script ran %d times when state lookup failed with no prior read, want 3", n)
 		}
 		recorded := runs.snapshot()
 		if len(recorded) != 3 {

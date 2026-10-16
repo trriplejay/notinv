@@ -81,6 +81,9 @@ func Run(ctx context.Context, script Script, rc *Context, store RunStore) error 
 		return err
 	}
 
+	var hasLastEnabled bool
+	var lastEnabled bool
+
 	for first := true; ; first = false {
 		if !first && !waitUntil(ctx, sched.Next(wallNow())) {
 			return nil
@@ -90,13 +93,25 @@ func Run(ctx context.Context, script Script, rc *Context, store RunStore) error 
 			return nil
 		}
 
-		enabled, err := store.ScriptEnabled(ctx, script.Name())
+		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		enabled, err := store.ScriptEnabled(checkCtx, script.Name())
+		cancel()
 		if ctx.Err() != nil {
 			return nil
 		}
 		if err != nil {
 			rc.Log.WarnContext(ctx, "check script enabled failed", slog.String("script", script.Name()), slog.Any("error", err))
-		} else if !enabled {
+			if hasLastEnabled {
+				enabled = lastEnabled
+			} else {
+				enabled = true
+			}
+		} else {
+			lastEnabled = enabled
+			hasLastEnabled = true
+		}
+
+		if !enabled {
 			continue
 		}
 
