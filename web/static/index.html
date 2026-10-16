@@ -185,6 +185,7 @@
     const refreshButton = document.getElementById('refresh');
     const filterInput = document.getElementById('filter');
     let refreshing = false;
+    let refreshQueued = false;
     let view = 'all';
     let loaded = false;
 
@@ -213,6 +214,9 @@
             cache: 'no-store'
           });
           if (!res.ok) throw new Error(`Request failed (${res.status})`);
+          const data = await res.json();
+          toggleBtn.textContent = data.enabled ? 'Disable' : 'Enable';
+          element.dataset.enabled = String(data.enabled);
           await refreshDashboard();
         } catch (error) {
           status.textContent = `${error.message}. Failed to update script state.`;
@@ -274,7 +278,10 @@
     }
 
     async function refreshDashboard() {
-      if (refreshing) return;
+      if (refreshing) {
+        refreshQueued = true;
+        return;
+      }
       refreshing = true;
       refreshButton.setAttribute('aria-busy', 'true');
       status.textContent = 'Refreshing…';
@@ -304,6 +311,10 @@
         refreshButton.removeAttribute('aria-busy');
         for (const skeleton of document.querySelectorAll('.skeleton')) skeleton.remove();
         applyFilter();
+        if (refreshQueued) {
+          refreshQueued = false;
+          void refreshDashboard();
+        }
       }
     }
 

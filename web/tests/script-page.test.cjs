@@ -87,10 +87,12 @@ test('script pages and slim cards with the real Go API and SQLite', async t => {
     await cardToggle.click();
     await page.waitForFunction(name => {
       const el = [...document.querySelectorAll('.card')].find(c => c.querySelector('h2 a')?.textContent === name);
-      return el?.querySelector('.toggle-btn')?.textContent === 'Enable';
+      return el?.querySelector('.toggle-btn')?.textContent === 'Enable' && el?.dataset.enabled === 'false';
     }, scriptName);
     assert.equal(await cardToggle.textContent(), 'Enable');
+    assert.equal(await card.getAttribute('data-enabled'), 'false');
 
+    // Verify button remains responsive and immediate even if a background refresh is pending
     // Verify /api/scripts reports enabled:false
     let res = await (await page.request.get(`${baseURL}/api/scripts`)).json();
     let scriptState = res.find(s => s.name === scriptName);
@@ -118,6 +120,102 @@ test('script pages and slim cards with the real Go API and SQLite', async t => {
     const restoredToggle = restoredCard.locator('.toggle-btn');
     await restoredToggle.waitFor({ state: 'visible' });
     assert.equal(await restoredToggle.textContent(), 'Disable');
+  });
+
+  await t.test('toggle button on landing card immediately renders state and allows immediate opposite toggle even if refresh overlaps', async () => {
+    await page.goto(baseURL);
+    const card = page.locator('.card').filter({ has: page.getByRole('heading', { name: scriptName, exact: true }) });
+    const cardToggle = card.locator('.toggle-btn');
+    await cardToggle.waitFor({ state: 'visible' });
+    assert.equal(await cardToggle.textContent(), 'Disable');
+
+    let releaseGet;
+    const holdGet = new Promise(resolve => { releaseGet = resolve; });
+    let getBlocked = false;
+    await page.route('**/api/scripts', async route => {
+      if (route.request().method() === 'GET' && !getBlocked) {
+        getBlocked = true;
+        await holdGet;
+      }
+      await route.continue();
+    });
+
+    // Trigger a refresh so `refreshing` is true while GET /api/scripts is held
+    await page.locator('#refresh').click();
+
+    // While refresh is in flight, click toggle button to disable
+    await cardToggle.click();
+
+    // Toggle button and card dataset.enabled immediately reflect response from POST /api/scripts/{name}/enabled
+    assert.equal(await cardToggle.textContent(), 'Enable');
+    assert.equal(await card.getAttribute('data-enabled'), 'false');
+
+    // Click toggle button a second time: sends opposite state (Enable) rather than keeping stale pre-click label
+    await cardToggle.click();
+    assert.equal(await cardToggle.textContent(), 'Disable');
+    assert.equal(await card.getAttribute('data-enabled'), 'true');
+
+    // Release held GET /api/scripts and remove route interceptor
+    releaseGet();
+    await page.unroute('**/api/scripts');
+
+    // Queued trailing refresh completes and state remains Disable
+    await page.waitForFunction(name => {
+      const el = [...document.querySelectorAll('.card')].find(c => c.querySelector('h2 a')?.textContent === name);
+      return el?.querySelector('.toggle-btn')?.textContent === 'Disable';
+    }, scriptName);
+    assert.equal(await cardToggle.textContent(), 'Disable');
+
+    // Verify /api/scripts confirms enabled: true
+    const res = await (await page.request.get(`${baseURL}/api/scripts`)).json();
+    const scriptState = res.find(s => s.name === scriptName);
+    assert.equal(scriptState?.enabled, true);
+  });
+
+  await t.test('toggle button on script page immediately renders state and allows immediate opposite toggle even if refresh overlaps', async () => {
+    await page.goto(`${baseURL}/script.html?name=${encodeURIComponent(scriptName)}`);
+    const scriptToggle = page.locator('#toggle');
+    await scriptToggle.waitFor({ state: 'visible' });
+    assert.equal(await scriptToggle.textContent(), 'Disable');
+
+    let releaseGet;
+    const holdGet = new Promise(resolve => { releaseGet = resolve; });
+    let getBlocked = false;
+    await page.route('**/api/scripts', async route => {
+      if (route.request().method() === 'GET' && !getBlocked) {
+        getBlocked = true;
+        await holdGet;
+      }
+      await route.continue();
+    });
+
+    // Trigger a refresh so `refreshing` is true while GET /api/scripts is held
+    await page.locator('#refresh').click();
+
+    // While refresh is in flight, click toggle button to disable
+    await scriptToggle.click();
+
+    // Toggle button immediately reflects response from POST /api/scripts/{name}/enabled
+    assert.equal(await scriptToggle.textContent(), 'Enable');
+    assert.equal(await page.locator('.card').getAttribute('data-enabled'), 'false');
+
+    // Click toggle button a second time: sends opposite state (Enable) rather than keeping stale pre-click label
+    await scriptToggle.click();
+    assert.equal(await scriptToggle.textContent(), 'Disable');
+    assert.equal(await page.locator('.card').getAttribute('data-enabled'), 'true');
+
+    // Release held GET /api/scripts and remove route interceptor
+    releaseGet();
+    await page.unroute('**/api/scripts');
+
+    // Queued trailing refresh completes and state remains Disable
+    await page.waitForFunction(() => document.querySelector('#toggle')?.textContent === 'Disable');
+    assert.equal(await scriptToggle.textContent(), 'Disable');
+
+    // Verify /api/scripts confirms enabled: true
+    const res = await (await page.request.get(`${baseURL}/api/scripts`)).json();
+    const scriptState = res.find(s => s.name === scriptName);
+    assert.equal(scriptState?.enabled, true);
   });
   assert.deepEqual(errors, []);
 });
