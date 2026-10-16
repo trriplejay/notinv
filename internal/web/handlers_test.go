@@ -541,6 +541,7 @@ func TestScriptEnabledHandler(t *testing.T) {
 		for _, badBody := range []string{"not json", `{}`, `{"enabled":"not a bool"}`, ``, `{"enabled":true} trailing garbage`} {
 			f := &fakeStore{}
 			r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/scripts/alpha/enabled", strings.NewReader(badBody))
+			r.Header.Set("Content-Type", "application/json")
 			w := serveRequest(t, "POST /api/scripts/{name}/enabled", r, NewScriptEnabledHandler(f, schedules))
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("body %q: status = %d, want 400", badBody, w.Code)
@@ -554,9 +555,53 @@ func TestScriptEnabledHandler(t *testing.T) {
 	t.Run("store error 500", func(t *testing.T) {
 		f := &fakeStore{setEnabledErr: errors.New("write failure")}
 		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/scripts/alpha/enabled", strings.NewReader(`{"enabled":false}`))
+		r.Header.Set("Content-Type", "application/json")
 		w := serveRequest(t, "POST /api/scripts/{name}/enabled", r, NewScriptEnabledHandler(f, schedules))
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", w.Code)
+		}
+	})
+
+	t.Run("unsupported media type 415", func(t *testing.T) {
+		for _, ct := range []string{"", "text/plain", "application/x-www-form-urlencoded", "multipart/form-data"} {
+			f := &fakeStore{}
+			// crafted form body that would decode as JSON if not rejected
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/scripts/alpha/enabled", strings.NewReader(`{"enabled":false,"a":"="}`))
+			if ct != "" {
+				r.Header.Set("Content-Type", ct)
+			}
+			w := serveRequest(t, "POST /api/scripts/{name}/enabled", r, NewScriptEnabledHandler(f, schedules))
+			if w.Code != http.StatusUnsupportedMediaType {
+				t.Fatalf("content-type %q: status = %d, want 415", ct, w.Code)
+			}
+			if len(f.disabled) != 0 {
+				t.Errorf("store modified on 415 for content-type %q: %v", ct, f.disabled)
+			}
+		}
+	})
+
+	t.Run("success with charset in content-type", func(t *testing.T) {
+		f := &fakeStore{}
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/scripts/alpha/enabled", strings.NewReader(`{"enabled":false}`))
+		r.Header.Set("Content-Type", "application/json; charset=utf-8")
+		w := serveRequest(t, "POST /api/scripts/{name}/enabled", r, NewScriptEnabledHandler(f, schedules))
+		assertJSON(t, w, `{"name":"alpha","enabled":false}`)
+		if !f.disabled["alpha"] {
+			t.Errorf("expected alpha to be disabled in store")
+		}
+	})
+
+	t.Run("cross-site rejected 403", func(t *testing.T) {
+		f := &fakeStore{}
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/scripts/alpha/enabled", strings.NewReader(`{"enabled":false}`))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Sec-Fetch-Site", "cross-site")
+		w := serveRequest(t, "POST /api/scripts/{name}/enabled", r, NewScriptEnabledHandler(f, schedules))
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", w.Code)
+		}
+		if len(f.disabled) != 0 {
+			t.Errorf("store modified on 403: %v", f.disabled)
 		}
 	})
 }

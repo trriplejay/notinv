@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"math"
+	"mime"
 	"net/http"
 	"sort"
 	"time"
@@ -163,6 +164,16 @@ func NewScriptEnabledHandler(db ScriptEnabler, schedules map[string]string) http
 		name := r.PathValue("name")
 		if _, ok := schedules[name]; !ok {
 			http.Error(w, "script not found", http.StatusNotFound)
+			return
+		}
+		ct := r.Header.Get("Content-Type")
+		mediaType, _, _ := mime.ParseMediaType(ct)
+		if mediaType != "application/json" {
+			http.Error(w, "unsupported media type: Content-Type must be application/json", http.StatusUnsupportedMediaType)
+			return
+		}
+		if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+			http.Error(w, "cross-site request forbidden", http.StatusForbidden)
 			return
 		}
 		var req setScriptEnabledRequest

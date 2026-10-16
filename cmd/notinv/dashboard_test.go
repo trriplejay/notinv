@@ -341,6 +341,7 @@ func TestNewMuxScriptEnabledRoute(t *testing.T) {
 	{
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodPost, "/api/scripts/unknown-script/enabled", strings.NewReader(`{"enabled":false}`))
+		r.Header.Set("Content-Type", "application/json")
 		mux.ServeHTTP(w, r)
 		if w.Code != http.StatusNotFound {
 			t.Fatalf("POST unknown script status = %d, want 404", w.Code)
@@ -356,6 +357,7 @@ func TestNewMuxScriptEnabledRoute(t *testing.T) {
 		for _, bad := range []string{"malformed json", `{}`, `{"enabled":"yes"}`} {
 			w := httptest.NewRecorder()
 			r := httptest.NewRequest(http.MethodPost, "/api/scripts/alpha/enabled", strings.NewReader(bad))
+			r.Header.Set("Content-Type", "application/json")
 			mux.ServeHTTP(w, r)
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("POST bad body %q status = %d, want 400", bad, w.Code)
@@ -382,6 +384,25 @@ func TestNewMuxScriptEnabledRoute(t *testing.T) {
 		list = getScripts()
 		if len(list) != 1 || !list[0].Enabled {
 			t.Fatalf("GET /api/scripts after GET on toggle route: got %+v, want alpha enabled=true", list)
+		}
+	}
+
+	// 7. Non-JSON Content-Type (e.g. cross-site text/plain form POST) returns 415 and leaves state unchanged
+	{
+		for _, ct := range []string{"text/plain", "application/x-www-form-urlencoded", ""} {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodPost, "/api/scripts/alpha/enabled", strings.NewReader(`{"enabled":false,"a":"="}`))
+			if ct != "" {
+				r.Header.Set("Content-Type", ct)
+			}
+			mux.ServeHTTP(w, r)
+			if w.Code != http.StatusUnsupportedMediaType {
+				t.Fatalf("POST Content-Type %q status = %d, want 415", ct, w.Code)
+			}
+		}
+		enabled, err = st.ScriptEnabled(t.Context(), "alpha")
+		if err != nil || !enabled {
+			t.Fatalf("st.ScriptEnabled after 415: got (%v, %v), want (true, nil)", enabled, err)
 		}
 	}
 }
