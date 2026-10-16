@@ -709,8 +709,8 @@ func TestRunDisabledAtTickAndReEnabledBeforeNextTick(t *testing.T) {
 	})
 }
 
-// CLM-3 / builder requirement: lookup error fails closed: skips run and logs error.
-func TestRunSkipsWhenScriptEnabledFails(t *testing.T) {
+// Governor ruling: lookup error fails open: logs warning and runs script as usual.
+func TestRunFailsOpenWhenScriptEnabledFails(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var buf bytes.Buffer
 		rc := &Context{Log: slog.New(slog.NewTextHandler(&buf, nil))}
@@ -726,33 +726,27 @@ func TestRunSkipsWhenScriptEnabledFails(t *testing.T) {
 		stop := startTestRunner(t, script, rc, runs)
 		defer stop()
 
-		// Advance across startup and several ticks; error must cause run to be skipped.
+		// Advance across startup (first iteration runs immediately) and 2 ticks (total 3 runs).
 		synctest.Wait()
-		for i := 0; i < 3; i++ {
+		for i := 0; i < 2; i++ {
 			time.Sleep(time.Second)
 			synctest.Wait()
 		}
 
-		if n := calls.Load(); n != 0 {
-			t.Fatalf("script ran %d times when state lookup failed, want 0", n)
+		if n := calls.Load(); n != 3 {
+			t.Fatalf("script ran %d times when state lookup failed, want 3", n)
 		}
-		if len(runs.snapshot()) != 0 {
-			t.Fatalf("recorded runs = %+v, want 0", runs.snapshot())
+		recorded := runs.snapshot()
+		if len(recorded) != 3 {
+			t.Fatalf("recorded runs = %+v, want 3", recorded)
 		}
-		if !strings.Contains(buf.String(), `msg="check script enabled failed" script=lookup-fail error="state db unavailable"`) {
-			t.Errorf("missing error log for state lookup failure: %s", buf.String())
+		for i, r := range recorded {
+			if r.Script != "lookup-fail" || !r.OK {
+				t.Errorf("run %d = %+v, want script=lookup-fail ok=true", i, r)
+			}
 		}
-
-		// Clear error; next tick should run normally.
-		runs.clearStateErr("lookup-fail")
-		time.Sleep(time.Second)
-		synctest.Wait()
-
-		if n := calls.Load(); n != 1 {
-			t.Fatalf("script calls after recovery = %d, want 1", n)
-		}
-		if len(runs.snapshot()) != 1 {
-			t.Fatalf("recorded runs after recovery = %+v, want 1", runs.snapshot())
+		if !strings.Contains(buf.String(), `level=WARN msg="check script enabled failed" script=lookup-fail error="state db unavailable"`) {
+			t.Errorf("missing warn log for state lookup failure: %s", buf.String())
 		}
 	})
 }

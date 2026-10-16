@@ -95,10 +95,8 @@ func Run(ctx context.Context, script Script, rc *Context, store RunStore) error 
 			return nil
 		}
 		if err != nil {
-			rc.Log.ErrorContext(ctx, "check script enabled failed", slog.String("script", script.Name()), slog.Any("error", err))
-			continue
-		}
-		if !enabled {
+			rc.Log.WarnContext(ctx, "check script enabled failed", slog.String("script", script.Name()), slog.Any("error", err))
+		} else if !enabled {
 			continue
 		}
 
