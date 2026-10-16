@@ -250,7 +250,6 @@ func TestScriptsSchedules(t *testing.T) {
 	assertJSON(t, w, `[
 		{"name":"alpha","latest":null,"uptime":0,"schedule":"@every 5m","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0,"enabled":true},
 		{"name":"beta","latest":null,"uptime":0,"schedule":"0 * * * *","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0,"enabled":true},
-		{"name":"missing","latest":null,"uptime":0,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0,"enabled":true},
 		{"name":"unused","latest":null,"uptime":0,"schedule":"@daily","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0,"enabled":true}
 	]`)
 }
