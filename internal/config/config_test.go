@@ -14,6 +14,7 @@ import (
 func unsetConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
+		"NOTINV_ENV",
 		"NOTINV_LISTEN",
 		"DATABASE_URL",
 		"NOTINV_RETENTION_DAYS",
@@ -37,6 +38,7 @@ func assertConfig(t *testing.T, got, want Config) {
 		got  any
 		want any
 	}{
+		{"Env", got.Env, want.Env},
 		{"Listen", got.Listen, want.Listen},
 		{"DatabaseURL", got.DatabaseURL, want.DatabaseURL},
 		{"RetentionDays", got.RetentionDays, want.RetentionDays},
@@ -55,7 +57,7 @@ func assertConfig(t *testing.T, got, want Config) {
 	}
 }
 
-// CLM-10: every documented default applies when all eight variables are unset.
+// CLM-10: every documented default applies when all nine variables are unset.
 func TestLoadDefaults(t *testing.T) {
 	unsetConfigEnv(t)
 	got, err := Load()
@@ -63,6 +65,7 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	assertConfig(t, *got, Config{
+		Env:           "dev",
 		Listen:        ":8080",
 		DatabaseURL:   "file:./data/notinv.db",
 		RetentionDays: 30,
@@ -72,13 +75,14 @@ func TestLoadDefaults(t *testing.T) {
 	})
 }
 
-// CLM-1: each of the eight explicit values overrides its default.
+// CLM-1: each of the nine explicit values overrides its default.
 func TestLoadOverrides(t *testing.T) {
 	unsetConfigEnv(t)
 	for _, tt := range []struct {
 		key   string
 		value string
 	}{
+		{"NOTINV_ENV", "prod"},
 		{"NOTINV_LISTEN", "127.0.0.1:9090"},
 		{"DATABASE_URL", "libsql://example.test/db"},
 		{"NOTINV_RETENTION_DAYS", "7"},
@@ -95,6 +99,7 @@ func TestLoadOverrides(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	assertConfig(t, *got, Config{
+		Env:               "prod",
 		Listen:            "127.0.0.1:9090",
 		DatabaseURL:       "libsql://example.test/db",
 		RetentionDays:     7,
@@ -190,6 +195,23 @@ func TestLoadLogFormat(t *testing.T) {
 	}
 }
 
+func TestLoadEnv(t *testing.T) {
+	for _, tt := range []struct {
+		value   string
+		wantErr bool
+	}{
+		{"dev", false},
+		{"prod", false},
+		{"staging", true},
+		{"PROD", true},
+		{"", true},
+	} {
+		t.Run(tt.value, func(t *testing.T) {
+			checkEnvValue(t, "NOTINV_ENV", tt.value, tt.wantErr)
+		})
+	}
+}
+
 // CLM-4 and libsql authentication: reject unsupported or malformed URLs and
 // require a separate auth token for libsql, even if the URL has userinfo.
 func TestLoadDatabaseURL(t *testing.T) {
@@ -279,6 +301,7 @@ func TestConfigLogValueFields(t *testing.T) {
 	for _, databaseURL := range []string{"file:./data/notinv.db", "libsql://example.test/db"} {
 		t.Run(databaseURL, func(t *testing.T) {
 			c := Config{
+				Env:           "prod",
 				Listen:        ":9090",
 				DatabaseURL:   databaseURL,
 				RetentionDays: 42,
@@ -296,6 +319,7 @@ func TestConfigLogValueFields(t *testing.T) {
 				got[attr.Key] = attr.Value.Any()
 			}
 			for key, want := range map[string]any{
+				"env":                 "prod",
 				"listen":              ":9090",
 				"database_url":        databaseURL,
 				"retention_days":      int64(42),

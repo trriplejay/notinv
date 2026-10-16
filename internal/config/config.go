@@ -13,6 +13,7 @@ import (
 // Config holds the validated startup settings for notinv.
 // String and LogValue redact credentials; the fields retain their original values.
 type Config struct {
+	Env               string
 	Listen            string
 	DatabaseURL       string
 	RetentionDays     int
@@ -29,6 +30,7 @@ type Config struct {
 // notifications; supplying only one of the two credentials is an error.
 func Load() (*Config, error) {
 	c := Config{
+		Env:               envOrDefault("NOTINV_ENV", "dev"),
 		Listen:            envOrDefault("NOTINV_LISTEN", ":8080"),
 		DatabaseURL:       envOrDefault("DATABASE_URL", "file:./data/notinv.db"),
 		LogLevel:          envOrDefault("NOTINV_LOG_LEVEL", "info"),
@@ -47,6 +49,11 @@ func Load() (*Config, error) {
 	}
 	c.RetentionDays = retention
 
+	switch c.Env {
+	case "dev", "prod":
+	default:
+		return nil, errors.New("NOTINV_ENV must be dev or prod")
+	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
@@ -100,6 +107,7 @@ func (c Config) GoString() string {
 // LogValue returns structured startup settings without exposing credentials.
 func (c Config) LogValue() slog.Value {
 	return slog.GroupValue(
+		slog.String("env", c.Env),
 		slog.String("listen", c.Listen),
 		slog.String("database_url", redactedDatabaseURL(c.DatabaseURL)),
 		slog.Int("retention_days", c.RetentionDays),
