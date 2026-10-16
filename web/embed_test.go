@@ -105,4 +105,3 @@ func TestScriptPageRefreshDashboardQueueAndImmediateToggle(t *testing.T) {
 		t.Error("script.html toggle click missing immediate update of toggleButton text and card.element.dataset.enabled")
 	}
 }
-
