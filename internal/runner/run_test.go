@@ -710,7 +710,17 @@ func TestRunDisabledAtTickAndReEnabledBeforeNextTick(t *testing.T) {
 }
 
 // Governor ruling: lookup error fails open: logs warning and runs script as usual.
+// TestRunSkipsWhenScriptEnabledFails asserts that runner.Run fails open when the
+// script enabled lookup fails (runs the script and inserts run rows, first iteration included).
+func TestRunSkipsWhenScriptEnabledFails(t *testing.T) {
+	testRunFailsOpenWhenScriptEnabledFails(t)
+}
+
 func TestRunFailsOpenWhenScriptEnabledFails(t *testing.T) {
+	testRunFailsOpenWhenScriptEnabledFails(t)
+}
+
+func testRunFailsOpenWhenScriptEnabledFails(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var buf bytes.Buffer
 		rc := &Context{Log: slog.New(slog.NewTextHandler(&buf, nil))}
