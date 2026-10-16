@@ -1,8 +1,9 @@
 services:
   notinv:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # Published by the Release workflow on every merge to main (amd64 only).
+    image: trriplejay/notinv:latest
+    platform: linux/amd64
+    pull_policy: always
     restart: unless-stopped
     env_file: .env
     ports:
