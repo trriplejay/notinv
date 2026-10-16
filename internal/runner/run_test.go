@@ -333,6 +333,39 @@ func TestRunCronScheduleTimezone(t *testing.T) {
 	})
 }
 
+// A host suspend pauses timers but not the wall clock. When the wall clock
+// passes a scheduled time during a suspend, the run happens within maxWait of
+// wake rather than after the full remaining timer, and missed runs are not
+// replayed.
+func TestRunAfterSuspend(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var suspended atomic.Int64
+		defer func(orig func() time.Time) { wallNow = orig }(wallNow)
+		wallNow = func() time.Time { return time.Now().Add(time.Duration(suspended.Load())).Round(0) }
+
+		runs := newFakeStore()
+		script := fakeScript{name: "pacific", schedule: pacificSchedule, run: func(context.Context, *Context) error {
+			return nil
+		}}
+		stop := startTestRunner(t, script, quietContext(), runs)
+		defer stop()
+		synctest.Wait()
+		if recorded := runs.snapshot(); len(recorded) != 1 {
+			t.Fatalf("startup recorded %+v, want one immediate run", recorded)
+		}
+		// The bubble starts at 16:00 Los Angeles time, 14h before the 06:00 run.
+		// Wait one awake hour, then suspend past 06:00 and past a second 06:00.
+		time.Sleep(time.Hour)
+		synctest.Wait()
+		suspended.Store(int64(40 * time.Hour))
+		time.Sleep(maxWait)
+		synctest.Wait()
+		if recorded := runs.snapshot(); len(recorded) != 2 {
+			t.Fatalf("recorded %d runs within maxWait of wake, want 2 (startup + one catch-up)", len(recorded))
+		}
+	})
+}
+
 func TestRunCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		runs := newFakeStore()

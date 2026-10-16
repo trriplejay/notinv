@@ -27,28 +27,37 @@ import (
 )
 
 // TestDefaultScripts verifies that the service's runnable set includes the
-// example, Nintendo and lunch scripts with their schedules.
+// Nintendo and lunch scripts with their schedules in every environment, and the
+// example script only in dev.
 func TestDefaultScripts(t *testing.T) {
-	want := map[string]string{
-		"example":  "",
+	schedules := map[string]string{
 		"nintendo": "@every 1m",
 		"lunch":    "CRON_TZ=America/Los_Angeles 0 6 * * *",
 	}
-	seen := map[string]bool{}
-	for _, script := range defaultScripts() {
-		schedule, ok := want[script.Name()]
-		if !ok {
-			continue
-		}
-		seen[script.Name()] = true
-		if schedule != "" && script.Schedule() != schedule {
-			t.Errorf("%s schedule = %q, want %q", script.Name(), script.Schedule(), schedule)
-		}
-	}
-	for name := range want {
-		if !seen[name] {
-			t.Errorf("%s is absent from the service's default scripts", name)
-		}
+	for _, tt := range []struct {
+		env         string
+		wantExample bool
+	}{
+		{"dev", true},
+		{"prod", false},
+	} {
+		t.Run(tt.env, func(t *testing.T) {
+			seen := map[string]bool{}
+			for _, script := range defaultScripts(tt.env) {
+				seen[script.Name()] = true
+				if want, ok := schedules[script.Name()]; ok && script.Schedule() != want {
+					t.Errorf("%s schedule = %q, want %q", script.Name(), script.Schedule(), want)
+				}
+			}
+			for name := range schedules {
+				if !seen[name] {
+					t.Errorf("%s is absent from the %s scripts", name, tt.env)
+				}
+			}
+			if seen["example"] != tt.wantExample {
+				t.Errorf("example registered = %v, want %v", seen["example"], tt.wantExample)
+			}
+		})
 	}
 }
 
@@ -163,13 +172,14 @@ func TestWarnIfDryRun(t *testing.T) {
 	}
 }
 
-// CLM-13: the repository's example is valid dotenv with all eight settings.
+// CLM-13: the repository's example is valid dotenv with all nine settings.
 func TestEnvExampleParses(t *testing.T) {
 	values, err := godotenv.Read("../../.env.example")
 	if err != nil {
 		t.Fatalf("read .env.example: %v", err)
 	}
 	keys := []string{
+		"NOTINV_ENV",
 		"NOTINV_LISTEN",
 		"DATABASE_URL",
 		"NOTINV_RETENTION_DAYS",

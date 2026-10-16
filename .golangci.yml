@@ -8,6 +8,12 @@ linters:
     - misspell
     - revive
     - unconvert
+  exclusions:
+    rules:
+      # Tests build canned in-memory *http.Response values that need no closing.
+      - path: _test\.go
+        linters:
+          - bodyclose
 
 formatters:
   enable:

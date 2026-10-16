@@ -91,11 +91,12 @@ persistence, see the volume instructions in the Compose section below.
 
 ## 4. Environment variable reference
 
-These are the **eight central service settings**, matching `.env.example` and
+These are the **nine central service settings**, matching `.env.example` and
 `internal/config/config.go`. Script-specific settings are separate (see below).
 
 | Variable | Default when unset | Meaning / validation |
 | --- | --- | --- |
+| `NOTINV_ENV` | `dev` | One of `dev`, `prod`. `prod` does not register the `example` script. |
 | `NOTINV_LISTEN` | `:8080` | HTTP listen address for the dashboard and API. |
 | `DATABASE_URL` | `file:./data/notinv.db` | Database URL; supported schemes are `file:` and `libsql:`. |
 | `DATABASE_AUTH_TOKEN` | Empty | Required for a `libsql:` URL; not needed for a local file. |
@@ -188,7 +189,7 @@ on subsequent runs.
 Scripts read their own variables directly with `os.Getenv`, using a script-name
 prefix: `SCRIPTNAME_VAR`. The original template reads `os.Getenv("EXAMPLE_URL")`;
 your renamed `widget` script reads `os.Getenv("WIDGET_STOCK_URL")`. These are
-per-script settings, **not additions to the eight central configuration keys**.
+per-script settings, **not additions to the nine central configuration keys**.
 
 Add `WIDGET_STOCK_URL` to your `.env`, setting it to the full HTTP(S) URL of an
 endpoint you control whose response you can change. It must be reachable from
@@ -202,31 +203,31 @@ MealViewer URL (defaults to `Bryant` when unset).
 
 ### Built-in scripts
 
-In addition to `scripts/example`, the service includes built-in scripts:
+In addition to `scripts/example` (registered only when `NOTINV_ENV=dev`, the
+default), the service includes built-in scripts:
 
 - `nintendo` (`scripts/nintendo`): monitors the Electric Ocarina of Time storefront offer every minute (`@every 1m`) and notifies on transitions into stock.
 - `lunch` (`scripts/lunch`): sends the MealViewer school lunch menu daily at 6:00am Pacific (`America/Los_Angeles`, following daylight saving; schedule `CRON_TZ=America/Los_Angeles 0 6 * * *`). It does **not** send a message when the service starts up (only at the 6:00am run). It lists that day's lunch items one per line. If no menu is found, it sends a message saying no menu was found; on retrieval failures, it sends a message indicating the menu could not be retrieved and records that run as failed. It reads the `LUNCH_SCHOOL` environment variable (the school name in the MealViewer URL, default `Bryant`).
 
 ### Register in the entrypoint
 
-`cmd/notinv/main.go` currently has this one-line registration:
+`defaultScripts` in `cmd/notinv/main.go` builds the registered set for the
+current `NOTINV_ENV`:
 
 ```go
-scripts := []runner.Script{example.New()}
+func defaultScripts(env string) []runner.Script {
+	scripts := []runner.Script{nintendo.New(), lunch.New()}
+	if env != "prod" {
+		scripts = append([]runner.Script{example.New()}, scripts...)
+	}
+	return scripts
+}
 ```
 
-For this walkthrough, **replace** the example import with
-`"github.com/trriplejay/notinv/scripts/widget"` and replace the registration line
-with:
-
-```go
-scripts := []runner.Script{widget.New()}
-```
-
-That keeps only your new script running and avoids an unused `example` import.
-To run both instead, keep both imports and use
-`scripts := []runner.Script{example.New(), widget.New()}`; also set `EXAMPLE_URL`
-in `.env` for the original script. Registration is explicit, not directory
+Import `"github.com/trriplejay/notinv/scripts/widget"` and add `widget.New()` to
+the `scripts` slice to run it in every environment, or append it inside the
+`env != "prod"` block to run it only in dev. Update `TestDefaultScripts` in
+`cmd/notinv/main_test.go` to match. Registration is explicit, not directory
 scanning. Rebuild after changing script code or registration.
 
 ## 6. Run the service
@@ -251,11 +252,13 @@ From the repo root, with Docker running:
 docker compose up
 ```
 
-The repository's `docker-compose.yml` defines the `notinv` service, builds from
-the local `Dockerfile`, loads `.env` through `env_file: .env`, and publishes
+The repository's `docker-compose.yml` defines the `notinv` service, pulls
+`trriplejay/notinv:latest` from Docker Hub (published by the Release workflow on
+every merge to `main`), loads `.env` through `env_file: .env`, and publishes
 `8080:8080` (host port 8080 to container port 8080). Keep `NOTINV_LISTEN=:8080`
-for that mapping, and open <http://localhost:8080>. After modifying script code
-or registration, use `docker compose up --build` to rebuild the image.
+for that mapping, and open <http://localhost:8080>. The image is built for
+`linux/amd64` only; on Apple Silicon, Docker runs it under emulation. To run
+local, unmerged script changes, use `make dev` (see below).
 
 For `DATABASE_URL=file:./data/notinv.db`, the Compose file includes a
 **commented-out** `./data:/app/data` volume. To keep the database across container

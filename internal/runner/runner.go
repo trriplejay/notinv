@@ -49,6 +49,18 @@ func NewContext(log *slog.Logger, httpClient *http.Client, cfg *config.Config) *
 	return rc
 }
 
+// maxWait bounds each timer wait between runs. Timers follow the monotonic
+// clock, which stops while the host is suspended (a sleeping laptop, or Docker
+// Desktop's VM), so a single long timer would fire late by the time spent
+// asleep. Rechecking the wall clock at this interval runs a schedule whose time
+// passed during a suspend within maxWait of wake. Missed runs are not replayed.
+const maxWait = time.Minute
+
+// wallNow reads the wall clock without a monotonic reading, so differences
+// computed from it include time the host spent suspended. Tests replace it to
+// simulate a suspend.
+var wallNow = func() time.Time { return time.Now().Round(0) }
+
 // RunStore persists the outcome of each completed script run and reports
 // whether a script is currently enabled.
 type RunStore interface {
@@ -70,15 +82,8 @@ func Run(ctx context.Context, script Script, rc *Context, store RunStore) error 
 	}
 
 	for first := true; ; first = false {
-		if !first {
-			next := sched.Next(time.Now())
-			timer := time.NewTimer(time.Until(next))
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil
-			case <-timer.C:
-			}
+		if !first && !waitUntil(ctx, sched.Next(wallNow())) {
+			return nil
 		}
 		// Prefer shutdown if the timer and cancellation became ready together.
 		if ctx.Err() != nil {
@@ -130,6 +135,24 @@ func Run(ctx context.Context, script Script, rc *Context, store RunStore) error 
 		}
 		if err := store.InsertRun(ctx, run); err != nil {
 			rc.Log.ErrorContext(ctx, "insert run failed", slog.String("script", script.Name()), slog.Any("error", err))
+		}
+	}
+}
+
+// waitUntil blocks until the wall clock reaches next, rechecking at least every
+// maxWait, and reports false if ctx is cancelled first.
+func waitUntil(ctx context.Context, next time.Time) bool {
+	for {
+		d := next.Sub(wallNow())
+		if d <= 0 {
+			return true
+		}
+		timer := time.NewTimer(min(d, maxWait))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
 		}
 	}
 }

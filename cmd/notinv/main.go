@@ -77,7 +77,7 @@ func run() error {
 	}
 	writer := rc.NewWriter(st, version, logger, rc.Options{})
 
-	scripts := defaultScripts()
+	scripts := defaultScripts(cfg.Env)
 	cancelRuns, drainDone := startRunners(ctx, scripts, newServicesFor(logger, cfg, writer), st)
 	defer cancelRuns()
 
@@ -150,9 +150,14 @@ func run() error {
 	return errors.Join(serveErr, shutdownErr)
 }
 
-// defaultScripts returns fresh instances of the scripts scheduled by the service.
-func defaultScripts() []runner.Script {
-	return []runner.Script{example.New(), nintendo.New(), lunch.New()}
+// defaultScripts returns fresh instances of the scripts scheduled by the service
+// in env. The example script is registered only outside prod.
+func defaultScripts(env string) []runner.Script {
+	scripts := []runner.Script{nintendo.New(), lunch.New()}
+	if env != "prod" {
+		scripts = append([]runner.Script{example.New()}, scripts...)
+	}
+	return scripts
 }
 
 func newLogger(w io.Writer, level, format string) *slog.Logger {

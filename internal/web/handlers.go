@@ -21,7 +21,6 @@ type RunQuerier interface {
 type ScriptLister interface {
 	RunQuerier
 	RequestQuerier
-	ListScripts(ctx context.Context) ([]string, error)
 	LatestRun(ctx context.Context, script string) (*store.Run, error)
 	ScriptEnabled(ctx context.Context, script string) (bool, error)
 }
@@ -88,13 +87,14 @@ func NewScriptsHandler(db ScriptLister, schedules map[string]string, now func() 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		until := now()
 		since := until.Add(-7 * 24 * time.Hour)
-		names, err := db.ListScripts(r.Context())
-		if err != nil {
-			http.Error(w, "cannot list scripts", http.StatusInternalServerError)
-			return
+		// Only scripts registered in this process are listed: history left by
+		// scripts registered elsewhere (another NOTINV_ENV, a removed script)
+		// stays in the store but is not shown.
+		names := make([]string, 0, len(schedules))
+		for name := range schedules {
+			names = append(names, name)
 		}
-		// Registered scripts appear before their first recorded run.
-		names = mergeNames(names, schedules)
+		sort.Strings(names)
 		out := make([]scriptDTO, 0, len(names))
 		for _, name := range names {
 			latest, err := db.LatestRun(r.Context(), name)
@@ -302,25 +302,6 @@ func clock(now func() time.Time) func() time.Time {
 }
 
 // mergeNames returns the sorted, distinct union of recorded and registered names.
-func mergeNames(recorded []string, schedules map[string]string) []string {
-	seen := make(map[string]bool, len(recorded)+len(schedules))
-	names := make([]string, 0, len(recorded)+len(schedules))
-	for _, name := range recorded {
-		if !seen[name] {
-			seen[name] = true
-			names = append(names, name)
-		}
-	}
-	for name := range schedules {
-		if !seen[name] {
-			seen[name] = true
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-	return names
-}
-
 func windowStart(r *http.Request, until time.Time) (time.Time, error) {
 	if since := r.URL.Query().Get("since"); since != "" {
 		return time.Parse(time.RFC3339, since)
