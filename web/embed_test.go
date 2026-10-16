@@ -1,6 +1,7 @@
 package webassets
 
 import (
+	"bytes"
 	"io/fs"
 	"regexp"
 	"testing"
@@ -8,6 +9,8 @@ import (
 
 func TestEmbeddedAssetsStayLocal(t *testing.T) {
 	external := regexp.MustCompile(`(?i)https?://`)
+	// SVG requires this namespace identifier; it is never fetched.
+	svgNamespace := []byte("http://www.w3.org/2000/svg")
 	err := fs.WalkDir(assets, "static", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -19,7 +22,7 @@ func TestEmbeddedAssetsStayLocal(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if external.Match(data) {
+		if external.Match(bytes.ReplaceAll(data, svgNamespace, nil)) {
 			t.Errorf("external URL literal in %s", path)
 		}
 		return nil
