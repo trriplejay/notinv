@@ -758,6 +758,13 @@ func TestRunSkipsWhenDisabledAndScriptEnabledFails(t *testing.T) {
 	})
 }
 
+// TestRunSkipsWhenScriptEnabledFails asserts that when the enabled-state read fails
+// with no prior state (e.g. at startup), the runner fails OPEN: it logs a warning,
+// runs the script, and records the run in the store.
+func TestRunSkipsWhenScriptEnabledFails(t *testing.T) {
+	TestRunFailsOpenWhenScriptEnabledFails(t)
+}
+
 // When no prior read has succeeded (e.g. startup read fails), runner fails open.
 func TestRunFailsOpenWhenScriptEnabledFails(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
