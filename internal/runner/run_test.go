@@ -804,7 +804,29 @@ func TestRunFailsOpenWhenScriptEnabledFails(t *testing.T) {
 		if !strings.Contains(buf.String(), `level=WARN msg="check script enabled failed" script=lookup-fail error="state db unavailable"`) {
 			t.Errorf("missing warn log for state lookup failure: %s", buf.String())
 		}
+
+		// Clearing the error resumes normal execution.
+		runs.clearStateErr("lookup-fail")
+		time.Sleep(time.Second)
+		synctest.Wait()
+
+		if n := calls.Load(); n != 4 {
+			t.Fatalf("script calls after error cleared = %d, want 4", n)
+		}
+		recorded = runs.snapshot()
+		if len(recorded) != 4 {
+			t.Fatalf("recorded runs after error cleared = %+v, want 4", recorded)
+		}
+		if !recorded[3].OK || recorded[3].Script != "lookup-fail" {
+			t.Errorf("run after error cleared = %+v, want script=lookup-fail ok=true", recorded[3])
+		}
 	})
+}
+
+// TestRunClearingErrorResumesRunning asserts that after transient read errors,
+// clearing the error resumes normal execution.
+func TestRunClearingErrorResumesRunning(t *testing.T) {
+	TestRunFailsOpenWhenScriptEnabledFails(t)
 }
 
 // Governor ruling / fk_0ffa8916e7be: recovery path after read error.
@@ -848,12 +870,16 @@ func TestRunRecoversAfterReadFailureWhenEnabledAgain(t *testing.T) {
 		}
 
 		// The error clears while stored state is still disabled: runner returns to reading
-		// the real enabled state and stays skipped (does not fail open).
+		// the real enabled state and stays skipped (does not fail open), with no Run call
+		// and no run row.
 		runs.clearStateErr("recovery-script")
 		time.Sleep(time.Second)
 		synctest.Wait()
 		if n := calls.Load(); n != 0 {
 			t.Fatalf("tick 2 (after error cleared, still disabled): calls = %d, want 0", n)
+		}
+		if recorded := runs.snapshot(); len(recorded) != 0 {
+			t.Fatalf("tick 2 (after error cleared, still disabled): recorded runs = %+v, want 0", recorded)
 		}
 
 		// Stored state is re-enabled: next scheduled tick reads enabled and runs.
@@ -879,6 +905,69 @@ func TestRunRecoversAfterReadFailureWhenEnabledAgain(t *testing.T) {
 			if r.Script != "recovery-script" || !r.OK {
 				t.Errorf("run %d = %+v, want script=recovery-script ok=true", i, r)
 			}
+		}
+	})
+}
+
+// Governor ruling: when an initial read fails (runner fails open at startup),
+// clearing the error while stored state is disabled returns to reading the real
+// state and skips execution (no new Run call and no new run row). Setting it to
+// enabled subsequently resumes scheduled execution.
+func TestRunRecoversFromInitialReadFailureToDisabledThenEnabled(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var buf bytes.Buffer
+		rc := &Context{Log: slog.New(slog.NewTextHandler(&buf, nil))}
+		runs := newFakeStore()
+
+		var calls atomic.Int32
+		script := fakeScript{name: "init-fail-recovery", schedule: "@every 1s", run: func(context.Context, *Context) error {
+			calls.Add(1)
+			return nil
+		}}
+
+		// Initial read fails: store has error, stored state is disabled.
+		runs.setEnabled("init-fail-recovery", false)
+		runs.setStateErr("init-fail-recovery", errors.New("initial read error"))
+
+		stop := startTestRunner(t, script, rc, runs)
+		defer stop()
+
+		// Startup check (tick 0): with no prior read, runner fails open and executes once.
+		synctest.Wait()
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("startup: calls = %d, want 1 (failed open)", n)
+		}
+		if recorded := runs.snapshot(); len(recorded) != 1 {
+			t.Fatalf("startup: recorded runs = %+v, want 1", recorded)
+		}
+
+		// The error is cleared while stored state is disabled: runner returns to reading
+		// the real enabled state and stays skipped with no Run call and no run row.
+		runs.clearStateErr("init-fail-recovery")
+		time.Sleep(time.Second)
+		synctest.Wait()
+
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("tick 1 (after error cleared, disabled): calls = %d, want 1 (must stay skipped)", n)
+		}
+		if recorded := runs.snapshot(); len(recorded) != 1 {
+			t.Fatalf("tick 1 (after error cleared, disabled): recorded runs = %+v, want 1", recorded)
+		}
+
+		// Stored state is re-enabled: next scheduled tick reads enabled and runs.
+		runs.setEnabled("init-fail-recovery", true)
+		time.Sleep(time.Second)
+		synctest.Wait()
+
+		if n := calls.Load(); n != 2 {
+			t.Fatalf("tick 2 (after re-enabled): calls = %d, want 2", n)
+		}
+		recorded := runs.snapshot()
+		if len(recorded) != 2 {
+			t.Fatalf("recorded runs after re-enabled = %+v, want 2", recorded)
+		}
+		if !recorded[1].OK || recorded[1].Script != "init-fail-recovery" {
+			t.Errorf("run after re-enable = %+v, want script=init-fail-recovery ok=true", recorded[1])
 		}
 	})
 }
