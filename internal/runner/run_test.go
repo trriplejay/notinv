@@ -806,3 +806,79 @@ func TestRunFailsOpenWhenScriptEnabledFails(t *testing.T) {
 		}
 	})
 }
+
+// Governor ruling / fk_0ffa8916e7be: recovery path after read error.
+// A script reads as disabled, then a read fails (it stays skipped using last-known state),
+// then the error clears and the stored state is read again: if still disabled, it stays
+// skipped; once enabled again, it runs at its scheduled ticks.
+func TestRunRecoversAfterReadFailureWhenEnabledAgain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var buf bytes.Buffer
+		rc := &Context{Log: slog.New(slog.NewTextHandler(&buf, nil))}
+		runs := newFakeStore()
+
+		var calls atomic.Int32
+		script := fakeScript{name: "recovery-script", schedule: "@every 1s", run: func(context.Context, *Context) error {
+			calls.Add(1)
+			return nil
+		}}
+
+		// Initial state is disabled: successful read returns disabled.
+		runs.setEnabled("recovery-script", false)
+
+		stop := startTestRunner(t, script, rc, runs)
+		defer stop()
+
+		// Startup check (tick 0): read succeeds, returns disabled -> skipped.
+		synctest.Wait()
+		if n := calls.Load(); n != 0 {
+			t.Fatalf("startup: script ran %d times while disabled, want 0", n)
+		}
+
+		// Subsequent read fails with an error: runner remembers last-known state (disabled) and skips.
+		runs.setStateErr("recovery-script", errors.New("transient state db error"))
+		time.Sleep(time.Second)
+		synctest.Wait()
+
+		if n := calls.Load(); n != 0 {
+			t.Fatalf("tick 1: script ran %d times while read failed and previously disabled, want 0", n)
+		}
+		if !strings.Contains(buf.String(), `level=WARN msg="check script enabled failed" script=recovery-script error="transient state db error"`) {
+			t.Errorf("missing warn log for state lookup failure: %s", buf.String())
+		}
+
+		// The error clears while stored state is still disabled: runner returns to reading
+		// the real enabled state and stays skipped (does not fail open).
+		runs.clearStateErr("recovery-script")
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if n := calls.Load(); n != 0 {
+			t.Fatalf("tick 2 (after error cleared, still disabled): calls = %d, want 0", n)
+		}
+
+		// Stored state is re-enabled: next scheduled tick reads enabled and runs.
+		runs.setEnabled("recovery-script", true)
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("tick 3 (after re-enabled): calls = %d, want 1", n)
+		}
+
+		// Subsequent tick also runs as scheduled.
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if n := calls.Load(); n != 2 {
+			t.Fatalf("tick 4: calls = %d, want 2", n)
+		}
+
+		recorded := runs.snapshot()
+		if len(recorded) != 2 {
+			t.Fatalf("recorded runs = %+v, want 2", recorded)
+		}
+		for i, r := range recorded {
+			if r.Script != "recovery-script" || !r.OK {
+				t.Errorf("run %d = %+v, want script=recovery-script ok=true", i, r)
+			}
+		}
+	})
+}
