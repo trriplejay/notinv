@@ -537,7 +537,7 @@ func TestScriptEnabledHandler(t *testing.T) {
 	})
 
 	t.Run("bad json body 400", func(t *testing.T) {
-		for _, badBody := range []string{"not json", `{}`, `{"enabled":"not a bool"}`, ``, `{"enabled":true} trailing garbage`} {
+		for _, badBody := range []string{"not json", `{}`, `{"enabled":"not a bool"}`, ``, `{"enabled":true} trailing garbage`, `{"enabled":true}{"second":true}`} {
 			f := &fakeStore{}
 			r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/scripts/alpha/enabled", strings.NewReader(badBody))
 			r.Header.Set("Content-Type", "application/json")

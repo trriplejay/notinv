@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"mime"
@@ -188,7 +189,7 @@ func NewScriptEnabledHandler(db ScriptEnabler, schedules map[string]string) http
 			return
 		}
 		var trailing any
-		if err := dec.Decode(&trailing); err != io.EOF {
+		if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
