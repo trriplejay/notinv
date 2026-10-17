@@ -499,7 +499,8 @@ func TestScriptsEnabled(t *testing.T) {
 		},
 		disabled: map[string]bool{"b": true},
 	}
-	w := serve(t, "GET /api/scripts", "/api/scripts", NewScriptsHandler(f, nil, fixedNow))
+	schedules := map[string]string{"a": "", "b": ""}
+	w := serve(t, "GET /api/scripts", "/api/scripts", NewScriptsHandler(f, schedules, fixedNow))
 	assertJSON(t, w, `[
 		{"name":"a","latest":null,"uptime":0,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0,"enabled":true},
 		{"name":"b","latest":null,"uptime":0,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0,"enabled":false}
