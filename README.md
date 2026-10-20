@@ -335,6 +335,8 @@ make lint    # golangci-lint run ./...
 make fmt     # format Go source with gofmt
 ```
 
+`make test` and `make ci` need `NOTINV_TEST_DATABASE_URL` set to a throwaway Postgres database URL (e.g. `postgres://postgres:postgres@localhost:5432/notinv_test?sslmode=disable`). Store-backed tests fail, not skip, when it is unset, and each test creates and drops its own `notinv_test_*` schema.
+
 Keep the copied script tests aligned with your script's behavior, particularly
 its initial baseline, healthy/unhealthy transitions, HTTP failures and notification
 errors. See the GitHub issues for ongoing development and the roadmap.

@@ -24,6 +24,7 @@ import (
 	"github.com/trriplejay/notinv/internal/rc"
 	"github.com/trriplejay/notinv/internal/runner"
 	"github.com/trriplejay/notinv/internal/store"
+	"github.com/trriplejay/notinv/internal/storetest"
 )
 
 // TestDefaultScripts verifies that the service's runnable set includes the
@@ -522,7 +523,7 @@ func TestServicesRecordScriptRequests(t *testing.T) {
 		w.WriteHeader(http.StatusTeapot)
 	}))
 	defer server.Close()
-	st, err := store.Open(t.Context(), "file:"+filepath.Join(t.TempDir(), "test.db"), "")
+	st, err := store.Open(t.Context(), storetest.DatabaseURL(t), "")
 	if err != nil {
 		t.Fatal(err)
 	}

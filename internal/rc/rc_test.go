@@ -11,17 +11,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/trriplejay/notinv/internal/store"
+	"github.com/trriplejay/notinv/internal/storetest"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -180,7 +177,7 @@ func TestTransportErrorRecord(t *testing.T) {
 
 func openTestStore(t *testing.T) (*store.Store, *sql.DB) {
 	t.Helper()
-	dsn := "file:" + filepath.Join(t.TempDir(), "test.db")
+	dsn := storetest.DatabaseURL(t)
 	s, err := store.Open(t.Context(), dsn, "")
 	if err != nil {
 		t.Fatal(err)
@@ -190,8 +187,8 @@ func openTestStore(t *testing.T) (*store.Store, *sql.DB) {
 			t.Error(err)
 		}
 	})
-	// The store package registers libsql; this is an independent query handle.
-	db, err := sql.Open("libsql", dsn)
+	// An independent query handle on the same test schema.
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,15 +197,6 @@ func openTestStore(t *testing.T) (*store.Store, *sql.DB) {
 			t.Error(err)
 		}
 	})
-	// These tests observe batches while the writer is active. WAL lets the
-	// independent reader observe commits without taking the writer's lock.
-	var mode string
-	if err := db.QueryRowContext(t.Context(), "PRAGMA journal_mode=WAL").Scan(&mode); err != nil {
-		t.Fatal(err)
-	}
-	if mode != "wal" {
-		t.Fatalf("journal mode = %q", mode)
-	}
 	return s, db
 }
 
@@ -432,44 +420,8 @@ func TestWriterFlushTriggers(t *testing.T) {
 	}
 }
 
-const testDatabaseURLEnv = "NOTINV_TEST_DATABASE_URL"
-
-var testSchemaCounter atomic.Int64
-
-func postgresTestURL(t *testing.T) string {
-	t.Helper()
-	base := os.Getenv(testDatabaseURLEnv)
-	if base == "" {
-		t.Fatalf("%s is not set; these integration tests need a Postgres database URL", testDatabaseURLEnv)
-	}
-	admin, err := sql.Open("pgx", base)
-	if err != nil {
-		t.Fatalf("open admin connection: %v", err)
-	}
-	t.Cleanup(func() { _ = admin.Close() })
-
-	schema := fmt.Sprintf("notinv_test_rc_%d_%d", time.Now().UnixNano(), testSchemaCounter.Add(1))
-	if _, err := admin.ExecContext(t.Context(), `CREATE SCHEMA `+schema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.ExecContext(context.Background(), `DROP SCHEMA `+schema+` CASCADE`); err != nil {
-			t.Errorf("drop schema %s: %v", schema, err)
-		}
-	})
-
-	u, err := url.Parse(base)
-	if err != nil {
-		t.Fatalf("parse %s: %v", testDatabaseURLEnv, err)
-	}
-	q := u.Query()
-	q.Set("search_path", schema)
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
 func TestShutdownFlushAfterCancellation(t *testing.T) {
-	dbURL := postgresTestURL(t)
+	dbURL := storetest.DatabaseURL(t)
 	s, err := store.Open(t.Context(), dbURL, "")
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)

@@ -6,17 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 	"time"
+
+	"github.com/trriplejay/notinv/internal/storetest"
 )
 
 func openTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
-	dsn := "file:" + filepath.Join(t.TempDir(), "test.db")
+	dsn := storetest.DatabaseURL(t)
 	s, err := Open(t.Context(), dsn, "")
 	if err != nil {
 		t.Fatal(err)
@@ -59,12 +59,12 @@ func TestDeleteOlderThan(t *testing.T) {
 			statement string
 			want      int
 		}{
-			{`SELECT count(*) FROM requests WHERE started_at < ?`, 0},
-			{`SELECT count(*) FROM runs WHERE started_at < ?`, 0},
-			{`SELECT count(*) FROM requests WHERE started_at = ?`, 1},
-			{`SELECT count(*) FROM runs WHERE started_at = ?`, 1},
-			{`SELECT count(*) FROM requests WHERE started_at > ?`, 2},
-			{`SELECT count(*) FROM runs WHERE started_at > ?`, 2},
+			{`SELECT count(*) FROM requests WHERE started_at < $1`, 0},
+			{`SELECT count(*) FROM runs WHERE started_at < $1`, 0},
+			{`SELECT count(*) FROM requests WHERE started_at = $1`, 1},
+			{`SELECT count(*) FROM runs WHERE started_at = $1`, 1},
+			{`SELECT count(*) FROM requests WHERE started_at > $1`, 2},
+			{`SELECT count(*) FROM runs WHERE started_at > $1`, 2},
 		} {
 			var count int
 			if err := s.db.QueryRowContext(ctx, query.statement, cutoff.UnixMilli()).Scan(&count); err != nil {
@@ -106,31 +106,6 @@ func TestDeleteOlderThanCanceled(t *testing.T) {
 	cancel()
 	if err := s.DeleteOlderThan(ctx, time.UnixMilli(0)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected wrapped cancellation, got %v", err)
-	}
-}
-
-// Script runs and the retention sweep write concurrently; a local file store
-// must serialize them rather than fail with "database is locked".
-func TestLocalConcurrentWrites(t *testing.T) {
-	s, _ := openTestStore(t)
-	ctx := t.Context()
-	for i := range 20 {
-		var wg sync.WaitGroup
-		errs := make([]error, 4)
-		wg.Add(len(errs))
-		go func() { defer wg.Done(); errs[0] = s.DeleteOlderThan(ctx, time.Now().AddDate(0, 0, -30)) }()
-		go func() { defer wg.Done(); errs[1] = s.InsertRun(ctx, Run{Script: "a", StartedAt: time.Now(), OK: true}) }()
-		go func() {
-			defer wg.Done()
-			errs[2] = s.InsertRequests(ctx, []Request{{Script: "b", StartedAt: time.Now()}, {Script: "b", StartedAt: time.Now()}})
-		}()
-		go func() { defer wg.Done(); _, errs[3] = s.ListScripts(ctx) }()
-		wg.Wait()
-		for op, err := range errs {
-			if err != nil {
-				t.Fatalf("round %d, op %d: %v", i, op, errors.Unwrap(errors.Unwrap(err)))
-			}
-		}
 	}
 }
 
@@ -227,24 +202,24 @@ func TestRoundTripAndQueries(t *testing.T) {
 
 	var started int64
 	var storedType string
-	if err := s.db.QueryRowContext(ctx, `SELECT started_at, typeof(started_at) FROM requests WHERE script = ? ORDER BY started_at LIMIT 1`, script).Scan(&started, &storedType); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT started_at, pg_typeof(started_at)::text FROM requests WHERE script = $1 ORDER BY started_at LIMIT 1`, script).Scan(&started, &storedType); err != nil {
 		t.Fatal(err)
 	}
-	if started != 1735779845123 || storedType != "integer" {
+	if started != 1735779845123 || storedType != "bigint" {
 		t.Fatalf("persisted request start = %d (%s)", started, storedType)
 	}
-	var ok int
-	if err := s.db.QueryRowContext(ctx, `SELECT started_at, typeof(started_at), ok FROM runs WHERE script = ? ORDER BY started_at LIMIT 1`, script).Scan(&started, &storedType, &ok); err != nil {
+	var ok bool
+	if err := s.db.QueryRowContext(ctx, `SELECT started_at, pg_typeof(started_at)::text, ok FROM runs WHERE script = $1 ORDER BY started_at LIMIT 1`, script).Scan(&started, &storedType, &ok); err != nil {
 		t.Fatal(err)
 	}
-	if started != 1735779845123 || storedType != "integer" || ok != 1 {
-		t.Fatalf("persisted run = %d (%s), ok = %d", started, storedType, ok)
+	if started != 1735779845123 || storedType != "bigint" || !ok {
+		t.Fatalf("persisted run = %d (%s), ok = %t", started, storedType, ok)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT ok FROM runs WHERE script = ? AND started_at = ?`, script, int64(1735779846123)).Scan(&ok); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT ok FROM runs WHERE script = $1 AND started_at = $2`, script, int64(1735779846123)).Scan(&ok); err != nil {
 		t.Fatal(err)
 	}
-	if ok != 0 {
-		t.Fatalf("false persisted as %d", ok)
+	if ok {
+		t.Fatal("false persisted as true")
 	}
 }
 
@@ -339,7 +314,6 @@ func TestOpenFailure(t *testing.T) {
 		dsn    string
 		scheme string
 	}{
-		{"missing parent", "file:" + filepath.Join(t.TempDir(), token, "missing", "test.db"), "file"},
 		{"invalid URL", "libsql://example.invalid/%" + token, "unknown"},
 		{"unsupported scheme", token + "://example.invalid", "unknown"},
 	}
@@ -365,7 +339,7 @@ func TestOpenFailure(t *testing.T) {
 func TestCanceledOpen(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	s, err := Open(ctx, "file:"+filepath.Join(t.TempDir(), "test.db"), "")
+	s, err := Open(ctx, storetest.DatabaseURL(t), "")
 	if s != nil {
 		if closeErr := s.Close(); closeErr != nil {
 			t.Error(closeErr)
@@ -378,8 +352,8 @@ func TestCanceledOpen(t *testing.T) {
 }
 
 func TestMigrationFailureRollsBack(t *testing.T) {
-	dsn := "file:" + filepath.Join(t.TempDir(), "test.db")
-	db, err := sql.Open("libsql", dsn)
+	dsn := storetest.DatabaseURL(t)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +362,9 @@ func TestMigrationFailureRollsBack(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	// Conflict with the last table creation: earlier requests DDL must roll back.
+	// CREATE TABLE IF NOT EXISTS runs accepts this existing table, but the
+	// later CREATE UNIQUE INDEX idx_runs_key ON runs(key) fails because it has
+	// no key column. The requests DDL that ran before it must roll back.
 	if _, err := db.ExecContext(t.Context(), `CREATE TABLE runs (existing TEXT)`); err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +379,8 @@ func TestMigrationFailureRollsBack(t *testing.T) {
 		t.Fatalf("expected wrapped migration error: %v", err)
 	}
 	var count int
-	if err := db.QueryRowContext(t.Context(), `SELECT count(*) FROM sqlite_master WHERE name IN ('requests', 'schema_migrations')`).Scan(&count); err != nil {
+	if err := db.QueryRowContext(t.Context(), `SELECT count(*) FROM information_schema.tables
+		WHERE table_schema = current_schema() AND table_name IN ('requests', 'schema_migrations')`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {

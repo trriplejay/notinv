@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/trriplejay/notinv/internal/storetest"
 )
 
 // CLM-1: An integration test that terminates the store's backends with
@@ -19,11 +19,11 @@ import (
 // and a CHECK-constraint failure must be attempted exactly once. The test goes
 // red when the !s.remote short-circuit is restored.
 func TestRemoteOperationsRetryDriverFailures(t *testing.T) {
-	dbURL := postgresTestURL(t)
+	dbURL := storetest.DatabaseURL(t)
 	s := openPostgresStore(t, dbURL)
 	ctx := t.Context()
 
-	base := os.Getenv(testDatabaseURLEnv)
+	base := storetest.BaseURL(t)
 	admin, err := sql.Open("pgx", base)
 	if err != nil {
 		t.Fatalf("open admin connection: %v", err)

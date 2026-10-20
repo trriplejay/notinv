@@ -6,56 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"reflect"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/trriplejay/notinv/internal/storetest"
 )
-
-// testDatabaseURLEnv names the Postgres URL the integration tests run against.
-// The tests fail, never skip, when it is unset: they are the proof that the
-// store works on Postgres.
-const testDatabaseURLEnv = "NOTINV_TEST_DATABASE_URL"
-
-var schemaCounter atomic.Int64
-
-// postgresTestURL creates a fresh, uniquely named schema in the test database
-// and returns a postgres URL whose search_path points at it. The schema is
-// dropped when the test ends.
-func postgresTestURL(t *testing.T) string {
-	t.Helper()
-	base := os.Getenv(testDatabaseURLEnv)
-	if base == "" {
-		t.Fatalf("%s is not set; these integration tests need a Postgres database URL", testDatabaseURLEnv)
-	}
-	admin, err := sql.Open("pgx", base)
-	if err != nil {
-		t.Fatalf("open admin connection: %v", err)
-	}
-	t.Cleanup(func() { _ = admin.Close() })
-
-	schema := fmt.Sprintf("notinv_test_%d_%d", time.Now().UnixNano(), schemaCounter.Add(1))
-	if _, err := admin.ExecContext(t.Context(), `CREATE SCHEMA `+schema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.ExecContext(context.Background(), `DROP SCHEMA `+schema+` CASCADE`); err != nil {
-			t.Errorf("drop schema %s: %v", schema, err)
-		}
-	})
-
-	u, err := url.Parse(base)
-	if err != nil {
-		t.Fatalf("parse %s: %v", testDatabaseURLEnv, err)
-	}
-	q := u.Query()
-	q.Set("search_path", schema)
-	u.RawQuery = q.Encode()
-	return u.String()
-}
 
 func openPostgresStore(t *testing.T, databaseURL string) *Store {
 	t.Helper()
@@ -72,7 +30,7 @@ func strPtr(s string) *string { return &s }
 // CLM-2: migration 1 creates Postgres DDL with 64-bit timestamps, a boolean
 // ok, id primary keys and the two (script, started_at) indexes.
 func TestPostgresSchema(t *testing.T) {
-	dbURL := postgresTestURL(t)
+	dbURL := storetest.DatabaseURL(t)
 	s := openPostgresStore(t, dbURL)
 	ctx := t.Context()
 
@@ -168,7 +126,7 @@ func currentSchema(t *testing.T, s *Store) string {
 func TestPostgresRoundTrip(t *testing.T) {
 	for _, scheme := range []string{"postgres", "postgresql"} {
 		t.Run(scheme, func(t *testing.T) {
-			dbURL := postgresTestURL(t)
+			dbURL := storetest.DatabaseURL(t)
 			u, err := url.Parse(dbURL)
 			if err != nil {
 				t.Fatal(err)
@@ -246,7 +204,7 @@ func TestPostgresRoundTrip(t *testing.T) {
 // CLM-4: OK is a bool, StartedAt after 2038 round-trips, and since/until
 // bounds are inclusive at millisecond precision.
 func TestPostgresBoolAnd64BitTimes(t *testing.T) {
-	s := openPostgresStore(t, postgresTestURL(t))
+	s := openPostgresStore(t, storetest.DatabaseURL(t))
 	ctx := t.Context()
 
 	far := time.UnixMilli(time.Date(2100, 6, 15, 8, 30, 0, 123_000_000, time.UTC).UnixMilli())
@@ -323,7 +281,7 @@ func TestPostgresBoolAnd64BitTimes(t *testing.T) {
 func TestPostgresConcurrentMigrate(t *testing.T) {
 	for i := range 5 {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
-			dbURL := postgresTestURL(t)
+			dbURL := storetest.DatabaseURL(t)
 			ctx := t.Context()
 
 			var wg sync.WaitGroup
@@ -406,7 +364,7 @@ func TestPostgresConcurrentMigrate(t *testing.T) {
 // CLM-6: the Postgres pool is not capped at one connection, and concurrent
 // inserts and reads from many goroutines all succeed.
 func TestPostgresConcurrentAccess(t *testing.T) {
-	s := openPostgresStore(t, postgresTestURL(t))
+	s := openPostgresStore(t, storetest.DatabaseURL(t))
 	ctx := t.Context()
 
 	if max := s.db.Stats().MaxOpenConnections; max == 1 {
@@ -479,7 +437,7 @@ func TestPostgresConcurrentAccess(t *testing.T) {
 // context.Canceled when cancelled.
 func TestPostgresDeleteOlderThan(t *testing.T) {
 	t.Run("boundary", func(t *testing.T) {
-		s := openPostgresStore(t, postgresTestURL(t))
+		s := openPostgresStore(t, storetest.DatabaseURL(t))
 		ctx := t.Context()
 
 		cutoff := time.UnixMilli(time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC).UnixMilli())
@@ -532,7 +490,7 @@ func TestPostgresDeleteOlderThan(t *testing.T) {
 	})
 
 	t.Run("multi-batch", func(t *testing.T) {
-		s := openPostgresStore(t, postgresTestURL(t))
+		s := openPostgresStore(t, storetest.DatabaseURL(t))
 		ctx := t.Context()
 
 		cutoff := time.UnixMilli(time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC).UnixMilli())
@@ -566,7 +524,7 @@ func TestPostgresDeleteOlderThan(t *testing.T) {
 	})
 
 	t.Run("cancelled", func(t *testing.T) {
-		s := openPostgresStore(t, postgresTestURL(t))
+		s := openPostgresStore(t, storetest.DatabaseURL(t))
 
 		cancelCtx, cancel := context.WithCancel(t.Context())
 		cancel()
@@ -592,7 +550,7 @@ func TestPostgresCallDeadlineUnderTableLock(t *testing.T) {
 	perCallTimeout = 1 * time.Second
 	defer func() { perCallTimeout = orig }()
 
-	dbURL := postgresTestURL(t)
+	dbURL := storetest.DatabaseURL(t)
 	s := openPostgresStore(t, dbURL)
 
 	lockDB, err := sql.Open("pgx", dbURL)
@@ -678,7 +636,7 @@ func TestPostgresCallDeadlineUnderTableLock(t *testing.T) {
 // CLM-2: InsertRequests on the same 3-record batch twice and InsertRun on the same
 // Run twice leave 3 requests rows and 1 runs row, and both calls return nil.
 func TestPostgresIdempotentInsert(t *testing.T) {
-	s := openPostgresStore(t, postgresTestURL(t))
+	s := openPostgresStore(t, storetest.DatabaseURL(t))
 	ctx := t.Context()
 
 	base := time.Now().Truncate(time.Millisecond)
@@ -757,10 +715,7 @@ func TestPostgresIdempotentInsert(t *testing.T) {
 // or unknown database (3D000) returns on the first attempt. A cancelled context returns
 // promptly.
 func TestPostgresOpenRetry(t *testing.T) {
-	base := os.Getenv(testDatabaseURLEnv)
-	if base == "" {
-		t.Fatalf("%s is not set; these integration tests need a Postgres database URL", testDatabaseURLEnv)
-	}
+	base := storetest.BaseURL(t)
 
 	t.Run("retry loop on closed port", func(t *testing.T) {
 		origBudget := openWaitBudget
@@ -792,7 +747,7 @@ func TestPostgresOpenRetry(t *testing.T) {
 	t.Run("fail fast on bad password", func(t *testing.T) {
 		u, err := url.Parse(base)
 		if err != nil {
-			t.Fatalf("parse %s: %v", testDatabaseURLEnv, err)
+			t.Fatalf("parse %s: %v", storetest.EnvDatabaseURL, err)
 		}
 		user := "postgres"
 		if u.User != nil && u.User.Username() != "" {
@@ -815,7 +770,7 @@ func TestPostgresOpenRetry(t *testing.T) {
 	t.Run("fail fast on nonexistent database", func(t *testing.T) {
 		u, err := url.Parse(base)
 		if err != nil {
-			t.Fatalf("parse %s: %v", testDatabaseURLEnv, err)
+			t.Fatalf("parse %s: %v", storetest.EnvDatabaseURL, err)
 		}
 		u.Path = "/nonexistent_db_3d000_never_exists"
 
