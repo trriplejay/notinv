@@ -183,7 +183,7 @@ type shutdownBudget struct {
 }
 
 func defaultShutdownBudget() shutdownBudget {
-	return shutdownBudget{overall: 8 * time.Second, drain: 5 * time.Second}
+	return shutdownBudget{overall: 7 * time.Second, drain: 5 * time.Second}
 }
 
 func (b shutdownBudget) httpShutdown(elapsed time.Duration) time.Duration {

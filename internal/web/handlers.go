@@ -232,7 +232,9 @@ func NewSeriesHandler(db RequestQuerier, now func() time.Time) http.Handler {
 // NewHealthHandler serves GET /healthz, returning 503 when the database ping fails.
 func NewHealthHandler(db Pinger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := db.Ping(r.Context()); err != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 1500*time.Millisecond)
+		defer cancel()
+		if err := db.Ping(ctx); err != nil {
 			http.Error(w, "database unavailable", http.StatusServiceUnavailable)
 			return
 		}

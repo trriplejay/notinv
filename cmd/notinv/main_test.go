@@ -313,8 +313,11 @@ func TestOrchestrateShutdownDrain(t *testing.T) {
 
 func TestShutdownBudget(t *testing.T) {
 	budget := defaultShutdownBudget()
-	if budget.overall != 8*time.Second || budget.drain != 5*time.Second {
+	if budget.overall != 7*time.Second || budget.drain != 5*time.Second {
 		t.Fatalf("production budget = %+v", budget)
+	}
+	if total := budget.overall + rc.FinalFlushTimeout; total >= 10*time.Second {
+		t.Errorf("overall budget plus flush bound = %v, want < 10s", total)
 	}
 	if total := budget.drain + budget.httpShutdown(budget.drain); total > budget.overall || total >= 10*time.Second {
 		t.Errorf("shutdown timeouts total %v", total)

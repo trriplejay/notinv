@@ -18,6 +18,12 @@ type Options struct {
 	FlushInterval time.Duration
 }
 
+// FlushTimeout bounds the final flush on Close when persisting buffered records.
+const FlushTimeout = 2 * time.Second
+
+// FinalFlushTimeout is an alias for FlushTimeout.
+const FinalFlushTimeout = FlushTimeout
+
 // Writer persists buffered request records from a single background goroutine.
 // Close it before closing the store. Records arriving after Close are dropped.
 type Writer struct {
@@ -92,6 +98,7 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	start := time.Now()
 	resp, err := t.base.RoundTrip(outbound)
 	record := store.Request{
+		Key:    store.RandomKey(),
 		Script: t.name, Method: req.Method, URL: req.URL.String(),
 		StartedAt: start, DurationMs: time.Since(start).Milliseconds(),
 	}
@@ -168,12 +175,26 @@ func (w *Writer) run() {
 			for {
 				select {
 				case record := <-w.records:
-					appendRecord(record)
+					batch = append(batch, record)
 				default:
-					flush()
-					return
+					goto drained
 				}
 			}
 		}
+	}
+drained:
+	if len(batch) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), FlushTimeout)
+	defer cancel()
+	for len(batch) > 0 {
+		chunkSize := min(len(batch), w.batchSize)
+		chunk := batch[:chunkSize]
+		if err := w.store.InsertRequests(ctx, chunk); err != nil {
+			w.log.Warn("failed to persist request records", "err", err, "count", len(batch), "dropped", len(batch))
+			return
+		}
+		batch = batch[chunkSize:]
 	}
 }

@@ -5,17 +5,22 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/trriplejay/notinv/internal/store"
 )
 
@@ -86,6 +91,9 @@ func TestClientDefaultsAndRequestClone(t *testing.T) {
 			}
 			select {
 			case record := <-w.records:
+				if record.Key == "" {
+					t.Error("record has empty key")
+				}
 				if record.Script != "named-script" || record.Method != http.MethodPatch ||
 					record.URL != req.URL.String() || record.StatusCode != http.StatusAccepted || record.Err != nil ||
 					record.StartedAt.Before(before) || record.StartedAt.After(after) ||
@@ -424,35 +432,136 @@ func TestWriterFlushTriggers(t *testing.T) {
 	}
 }
 
+const testDatabaseURLEnv = "NOTINV_TEST_DATABASE_URL"
+
+var testSchemaCounter atomic.Int64
+
+func postgresTestURL(t *testing.T) string {
+	t.Helper()
+	base := os.Getenv(testDatabaseURLEnv)
+	if base == "" {
+		t.Fatalf("%s is not set; these integration tests need a Postgres database URL", testDatabaseURLEnv)
+	}
+	admin, err := sql.Open("pgx", base)
+	if err != nil {
+		t.Fatalf("open admin connection: %v", err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+
+	schema := fmt.Sprintf("notinv_test_rc_%d_%d", time.Now().UnixNano(), testSchemaCounter.Add(1))
+	if _, err := admin.ExecContext(t.Context(), `CREATE SCHEMA `+schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.ExecContext(context.Background(), `DROP SCHEMA `+schema+` CASCADE`); err != nil {
+			t.Errorf("drop schema %s: %v", schema, err)
+		}
+	})
+
+	u, err := url.Parse(base)
+	if err != nil {
+		t.Fatalf("parse %s: %v", testDatabaseURLEnv, err)
+	}
+	q := u.Query()
+	q.Set("search_path", schema)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 func TestShutdownFlushAfterCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	dsn := "file:" + filepath.Join(t.TempDir(), "cancelled.db")
-	s, err := store.Open(ctx, dsn, "")
+	dbURL := postgresTestURL(t)
+	s, err := store.Open(t.Context(), dbURL, "")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("store.Open: %v", err)
 	}
-	defer func() {
-		if err := s.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	defer cancel()
-	w := NewWriter(s, "test", nil, Options{FlushInterval: time.Hour})
-	w.enqueue(store.Request{Script: "cancelled-shutdown", StartedAt: time.Now()})
-	cancel()
-	w.Close()
-	db, err := sql.Open("libsql", dsn)
+	t.Cleanup(func() { _ = s.Close() })
+
+	db, err := sql.Open("pgx", dbURL)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("sql.Open: %v", err)
 	}
-	defer func() {
-		if err := db.Close(); err != nil {
-			t.Error(err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	t.Run("with lock", func(t *testing.T) {
+		tx, err := db.BeginTx(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("begin tx: %v", err)
 		}
-	}()
-	if count := requestCount(t, db); count != 1 {
-		t.Fatalf("shutdown after cancellation persisted %d records, want 1", count)
-	}
+		defer func() { _ = tx.Rollback() }()
+
+		if _, err := tx.ExecContext(t.Context(), "LOCK TABLE requests IN ACCESS EXCLUSIVE MODE"); err != nil {
+			t.Fatalf("lock table: %v", err)
+		}
+
+		var logs bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&logs, nil))
+		w := NewWriter(s, "test", logger, Options{FlushInterval: time.Hour})
+
+		const enqueued = 3
+		for i := 0; i < enqueued; i++ {
+			w.enqueue(store.Request{
+				Script:     "test-script",
+				Method:     "GET",
+				URL:        "https://example.com",
+				StartedAt:  time.Now(),
+				DurationMs: 10,
+				StatusCode: 200,
+			})
+		}
+
+		started := time.Now()
+		w.Close()
+		elapsed := time.Since(started)
+
+		if elapsed >= FlushTimeout+time.Second {
+			t.Errorf("Close took %v, want under %v", elapsed, FlushTimeout+time.Second)
+		}
+
+		logOutput := logs.String()
+		if !strings.Contains(logOutput, "level=WARN") {
+			t.Errorf("missing WARN level in log: %s", logOutput)
+		}
+		if !strings.Contains(logOutput, "failed to persist request records") {
+			t.Errorf("missing drop warning in log: %s", logOutput)
+		}
+		wantCount := fmt.Sprintf("count=%d", enqueued)
+		if !strings.Contains(logOutput, wantCount) {
+			t.Errorf("warning count missing or incorrect in log %q, want %s", logOutput, wantCount)
+		}
+	})
+
+	t.Run("without lock", func(t *testing.T) {
+		_, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		var logs bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&logs, nil))
+		w := NewWriter(s, "test", logger, Options{FlushInterval: time.Hour})
+
+		const enqueued = 2
+		for i := 0; i < enqueued; i++ {
+			w.enqueue(store.Request{
+				Script:     "test-script",
+				Method:     "GET",
+				URL:        "https://example.com",
+				StartedAt:  time.Now(),
+				DurationMs: 10,
+				StatusCode: 200,
+			})
+		}
+
+		cancel()
+		w.Close()
+
+		logOutput := logs.String()
+		if strings.Contains(logOutput, "level=WARN") || strings.Contains(logOutput, "failed to persist request records") {
+			t.Errorf("unexpected drop warning logged: %s", logOutput)
+		}
+
+		if got := requestCount(t, db); got != enqueued {
+			t.Errorf("persisted records = %d, want %d", got, enqueued)
+		}
+	})
 }
 
 func TestWriterDefaultsAndInsertFailure(t *testing.T) {
@@ -473,5 +582,40 @@ func TestWriterDefaultsAndInsertFailure(t *testing.T) {
 	}
 	if count := requestCount(t, db); count != 0 {
 		t.Fatalf("failed insert persisted %d rows", count)
+	}
+}
+
+func TestTransportAssignsDistinctKeys(t *testing.T) {
+	w := idleWriter(10, slog.Default())
+	client := New("key-script", w)
+	tr := client.Transport.(*transport)
+	tr.base = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	})
+
+	keys := make(map[string]bool)
+	const count = 5
+	for i := 0; i < count; i++ {
+		req := testRequest(t, http.MethodGet, fmt.Sprintf("https://example.com/%d", i))
+		resp, err := tr.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	for i := 0; i < count; i++ {
+		select {
+		case record := <-w.records:
+			if record.Key == "" {
+				t.Errorf("record %d has empty key", i)
+			}
+			if keys[record.Key] {
+				t.Errorf("duplicate key %q assigned", record.Key)
+			}
+			keys[record.Key] = true
+		default:
+			t.Fatalf("expected %d records, got %d", count, i)
+		}
 	}
 }

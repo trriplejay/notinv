@@ -94,19 +94,27 @@ func TestPostgresSchema(t *testing.T) {
 		{"schema_migrations", "applied_at", "bigint"},
 		{"requests", "id", "bigint"},
 		{"runs", "id", "bigint"},
+		{"requests", "key", "text"},
+		{"runs", "key", "text"},
 	} {
 		if got := columnType(c.table, c.column); got != c.want {
 			t.Errorf("%s.%s data_type = %q, want %q", c.table, c.column, got, c.want)
 		}
 	}
 
-	var nullable string
-	if err := s.db.QueryRowContext(ctx, `SELECT is_nullable FROM information_schema.columns
-		WHERE table_schema = current_schema() AND table_name = 'runs' AND column_name = 'ok'`).Scan(&nullable); err != nil {
-		t.Fatal(err)
-	}
-	if nullable != "NO" {
-		t.Errorf("runs.ok is_nullable = %q, want NO", nullable)
+	for _, col := range []struct{ table, column string }{
+		{"runs", "ok"},
+		{"requests", "key"},
+		{"runs", "key"},
+	} {
+		var nullable string
+		if err := s.db.QueryRowContext(ctx, `SELECT is_nullable FROM information_schema.columns
+			WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2`, col.table, col.column).Scan(&nullable); err != nil {
+			t.Fatal(err)
+		}
+		if nullable != "NO" {
+			t.Errorf("%s.%s is_nullable = %q, want NO", col.table, col.column, nullable)
+		}
 	}
 
 	for _, table := range []string{"requests", "runs"} {
@@ -125,9 +133,11 @@ func TestPostgresSchema(t *testing.T) {
 		}
 	}
 
-	for _, idx := range []struct{ name, table string }{
-		{"idx_requests_script_started", "requests"},
-		{"idx_runs_script_started", "runs"},
+	for _, idx := range []struct{ name, table, cols string }{
+		{"idx_requests_script_started", "requests", "(script, started_at)"},
+		{"idx_runs_script_started", "runs", "(script, started_at)"},
+		{"idx_requests_key", "requests", "(key)"},
+		{"idx_runs_key", "runs", "(key)"},
 	} {
 		var def string
 		err := s.db.QueryRowContext(ctx, `SELECT indexdef FROM pg_indexes
@@ -135,8 +145,11 @@ func TestPostgresSchema(t *testing.T) {
 		if err != nil {
 			t.Fatalf("index %s: %v", idx.name, err)
 		}
-		if !strings.Contains(def, "ON "+currentSchema(t, s)+"."+idx.table) || !strings.Contains(def, "(script, started_at)") {
-			t.Errorf("index %s definition = %q, want on %s (script, started_at)", idx.name, def, idx.table)
+		if !strings.Contains(def, "ON "+currentSchema(t, s)+"."+idx.table) || !strings.Contains(def, idx.cols) {
+			t.Errorf("index %s definition = %q, want on %s %s", idx.name, def, idx.table, idx.cols)
+		}
+		if strings.Contains(idx.name, "_key") && !strings.Contains(def, "UNIQUE") {
+			t.Errorf("index %s is not UNIQUE: %q", idx.name, def)
 		}
 	}
 }
@@ -188,6 +201,9 @@ func TestPostgresRoundTrip(t *testing.T) {
 			gotReqs, err := s.QueryRequests(ctx, "alpha", base, base.Add(time.Hour))
 			if err != nil {
 				t.Fatalf("QueryRequests: %v", err)
+			}
+			for i := range reqs {
+				reqs[i].Key = ""
 			}
 			if !reflect.DeepEqual(gotReqs, reqs) {
 				t.Errorf("QueryRequests = %+v, want %+v", gotReqs, reqs)
@@ -562,6 +578,276 @@ func TestPostgresDeleteOlderThan(t *testing.T) {
 		}
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("DeleteOlderThan error = %v, want errors.Is(..., context.Canceled)", err)
+		}
+	})
+}
+
+// CLM-3: Every Store database call runs each attempt under a per-call deadline
+// of a few seconds, derived from the caller's context. While a second connection
+// holds LOCK TABLE runs, requests IN ACCESS EXCLUSIVE MODE, InsertRun, QueryRuns,
+// InsertRequests and QueryRequests called with context.Background() each return
+// an error wrapping context.DeadlineExceeded within the per-call bound plus slack.
+func TestPostgresCallDeadlineUnderTableLock(t *testing.T) {
+	orig := perCallTimeout
+	perCallTimeout = 1 * time.Second
+	defer func() { perCallTimeout = orig }()
+
+	dbURL := postgresTestURL(t)
+	s := openPostgresStore(t, dbURL)
+
+	lockDB, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("open lock connection: %v", err)
+	}
+	t.Cleanup(func() { _ = lockDB.Close() })
+
+	tx, err := lockDB.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("begin lock tx: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback() })
+
+	if _, err := tx.ExecContext(t.Context(), `LOCK TABLE runs, requests IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock tables: %v", err)
+	}
+
+	bound := perCallTimeout
+	slack := 2 * time.Second
+
+	t.Run("InsertRun", func(t *testing.T) {
+		start := time.Now()
+		err := s.InsertRun(context.Background(), Run{Script: "test", StartedAt: time.Now(), OK: true})
+		elapsed := time.Since(start)
+		if err == nil {
+			t.Fatal("InsertRun succeeded while table was locked, want DeadlineExceeded")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("InsertRun error = %v, want wrapping context.DeadlineExceeded", err)
+		}
+		if elapsed < bound-100*time.Millisecond || elapsed > bound+slack {
+			t.Errorf("InsertRun elapsed = %v, want within [%v, %v]", elapsed, bound-100*time.Millisecond, bound+slack)
+		}
+	})
+
+	t.Run("QueryRuns", func(t *testing.T) {
+		start := time.Now()
+		_, err := s.QueryRuns(context.Background(), "test", time.Now().Add(-time.Hour), time.Now())
+		elapsed := time.Since(start)
+		if err == nil {
+			t.Fatal("QueryRuns succeeded while table was locked, want DeadlineExceeded")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("QueryRuns error = %v, want wrapping context.DeadlineExceeded", err)
+		}
+		if elapsed < bound-100*time.Millisecond || elapsed > bound+slack {
+			t.Errorf("QueryRuns elapsed = %v, want within [%v, %v]", elapsed, bound-100*time.Millisecond, bound+slack)
+		}
+	})
+
+	t.Run("InsertRequests", func(t *testing.T) {
+		start := time.Now()
+		err := s.InsertRequests(context.Background(), []Request{{Script: "test", Method: "GET", URL: "http://example.com", StartedAt: time.Now()}})
+		elapsed := time.Since(start)
+		if err == nil {
+			t.Fatal("InsertRequests succeeded while table was locked, want DeadlineExceeded")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("InsertRequests error = %v, want wrapping context.DeadlineExceeded", err)
+		}
+		if elapsed < bound-100*time.Millisecond || elapsed > bound+slack {
+			t.Errorf("InsertRequests elapsed = %v, want within [%v, %v]", elapsed, bound-100*time.Millisecond, bound+slack)
+		}
+	})
+
+	t.Run("QueryRequests", func(t *testing.T) {
+		start := time.Now()
+		_, err := s.QueryRequests(context.Background(), "test", time.Now().Add(-time.Hour), time.Now())
+		elapsed := time.Since(start)
+		if err == nil {
+			t.Fatal("QueryRequests succeeded while table was locked, want DeadlineExceeded")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("QueryRequests error = %v, want wrapping context.DeadlineExceeded", err)
+		}
+		if elapsed < bound-100*time.Millisecond || elapsed > bound+slack {
+			t.Errorf("QueryRequests elapsed = %v, want within [%v, %v]", elapsed, bound-100*time.Millisecond, bound+slack)
+		}
+	})
+}
+
+// CLM-2: InsertRequests on the same 3-record batch twice and InsertRun on the same
+// Run twice leave 3 requests rows and 1 runs row, and both calls return nil.
+func TestPostgresIdempotentInsert(t *testing.T) {
+	s := openPostgresStore(t, postgresTestURL(t))
+	ctx := t.Context()
+
+	base := time.Now().Truncate(time.Millisecond)
+	batch := []Request{
+		{Key: "req-key-1", Script: "idem", Method: "GET", URL: "https://example.com/1", StartedAt: base, DurationMs: 10, StatusCode: 200},
+		{Key: "req-key-2", Script: "idem", Method: "POST", URL: "https://example.com/2", StartedAt: base, DurationMs: 20, StatusCode: 201},
+		{Key: "req-key-3", Script: "idem", Method: "DELETE", URL: "https://example.com/3", StartedAt: base, DurationMs: 30, StatusCode: 204},
+	}
+
+	// First insert
+	if err := s.InsertRequests(ctx, batch); err != nil {
+		t.Fatalf("first InsertRequests: %v", err)
+	}
+	// Second insert with the exact same batch
+	if err := s.InsertRequests(ctx, batch); err != nil {
+		t.Fatalf("second InsertRequests: %v", err)
+	}
+
+	var reqCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM requests WHERE script = 'idem'`).Scan(&reqCount); err != nil {
+		t.Fatalf("count requests: %v", err)
+	}
+	if reqCount != 3 {
+		t.Errorf("requests row count = %d, want 3", reqCount)
+	}
+
+	run := Run{
+		Key:        "run-key-1",
+		Script:     "idem",
+		StartedAt:  base,
+		DurationMs: 50,
+		OK:         true,
+	}
+
+	// First insert
+	if err := s.InsertRun(ctx, run); err != nil {
+		t.Fatalf("first InsertRun: %v", err)
+	}
+	// Second insert with the exact same run
+	if err := s.InsertRun(ctx, run); err != nil {
+		t.Fatalf("second InsertRun: %v", err)
+	}
+
+	var runCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE script = 'idem'`).Scan(&runCount); err != nil {
+		t.Fatalf("count runs: %v", err)
+	}
+	if runCount != 1 {
+		t.Errorf("runs row count = %d, want 1", runCount)
+	}
+
+	// Verify auto-key assignment when key is empty
+	autoBatch := []Request{
+		{Script: "auto", Method: "GET", URL: "https://example.com/auto", StartedAt: base},
+	}
+	if err := s.InsertRequests(ctx, autoBatch); err != nil {
+		t.Fatalf("InsertRequests with empty key: %v", err)
+	}
+	if autoBatch[0].Key == "" {
+		t.Errorf("InsertRequests did not fill empty key on caller batch")
+	}
+
+	autoRun := Run{
+		Script:    "auto",
+		StartedAt: base,
+		OK:        true,
+	}
+	if err := s.InsertRun(ctx, autoRun); err != nil {
+		t.Fatalf("InsertRun with empty key: %v", err)
+	}
+}
+
+// CLM-5: store.Open retries the initial connect and ping on connection-class failures
+// (refused, reset, unreachable, 57P03) for about 60 seconds, then returns an error
+// saying the database could not be reached within the wait. An auth failure (28P01/28000)
+// or unknown database (3D000) returns on the first attempt. A cancelled context returns
+// promptly.
+func TestPostgresOpenRetry(t *testing.T) {
+	base := os.Getenv(testDatabaseURLEnv)
+	if base == "" {
+		t.Fatalf("%s is not set; these integration tests need a Postgres database URL", testDatabaseURLEnv)
+	}
+
+	t.Run("retry loop on closed port", func(t *testing.T) {
+		origBudget := openWaitBudget
+		origBackoff := openInitialBackoff
+		openWaitBudget = 2 * time.Second
+		openInitialBackoff = 20 * time.Millisecond
+		defer func() {
+			openWaitBudget = origBudget
+			openInitialBackoff = origBackoff
+		}()
+
+		// Closed port on localhost (54329)
+		closedPortURL := "postgres://user:pass@127.0.0.1:54329/testdb"
+		start := time.Now()
+		_, err := Open(t.Context(), closedPortURL, "")
+		elapsed := time.Since(start)
+
+		if err == nil {
+			t.Fatal("expected Open to fail for closed port, got nil")
+		}
+		if elapsed < 2*time.Second || elapsed >= 3*time.Second {
+			t.Errorf("elapsed time = %v, want at least 2s and less than 3s", elapsed)
+		}
+		if !strings.Contains(err.Error(), "could not be reached within the wait") {
+			t.Errorf("error = %v, want error naming the wait", err)
+		}
+	})
+
+	t.Run("fail fast on bad password", func(t *testing.T) {
+		u, err := url.Parse(base)
+		if err != nil {
+			t.Fatalf("parse %s: %v", testDatabaseURLEnv, err)
+		}
+		user := "postgres"
+		if u.User != nil && u.User.Username() != "" {
+			user = u.User.Username()
+		}
+		u.User = url.UserPassword(user, "wrong_password_never_valid_12345")
+
+		start := time.Now()
+		_, err = Open(t.Context(), u.String(), "")
+		elapsed := time.Since(start)
+
+		if err == nil {
+			t.Fatal("expected Open to fail for bad password, got nil")
+		}
+		if elapsed >= 1*time.Second {
+			t.Errorf("bad password took %v, want under 1s", elapsed)
+		}
+	})
+
+	t.Run("fail fast on nonexistent database", func(t *testing.T) {
+		u, err := url.Parse(base)
+		if err != nil {
+			t.Fatalf("parse %s: %v", testDatabaseURLEnv, err)
+		}
+		u.Path = "/nonexistent_db_3d000_never_exists"
+
+		start := time.Now()
+		_, err = Open(t.Context(), u.String(), "")
+		elapsed := time.Since(start)
+
+		if err == nil {
+			t.Fatal("expected Open to fail for nonexistent database, got nil")
+		}
+		if elapsed >= 1*time.Second {
+			t.Errorf("nonexistent database took %v, want under 1s", elapsed)
+		}
+	})
+
+	t.Run("prompt return on cancelled context", func(t *testing.T) {
+		closedPortURL := "postgres://user:pass@127.0.0.1:54329/testdb"
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel() // pre-cancelled
+
+		start := time.Now()
+		_, err := Open(ctx, closedPortURL, "")
+		elapsed := time.Since(start)
+
+		if err == nil {
+			t.Fatal("expected Open to fail for cancelled context, got nil")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got %v", err)
+		}
+		if elapsed >= 500*time.Millisecond {
+			t.Errorf("cancelled context took %v, want prompt return under 500ms", elapsed)
 		}
 	})
 }

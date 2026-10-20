@@ -131,5 +131,18 @@ func redactedDatabaseURL(raw string) string {
 		return "[REDACTED]"
 	}
 	parsed.User = nil
+	if parsed.RawQuery != "" {
+		q := parsed.Query()
+		modified := false
+		for k := range q {
+			if strings.Contains(strings.ToLower(k), "password") {
+				delete(q, k)
+				modified = true
+			}
+		}
+		if modified {
+			parsed.RawQuery = q.Encode()
+		}
+	}
 	return parsed.String()
 }

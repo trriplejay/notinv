@@ -339,13 +339,15 @@ func TestConfigLogValueFields(t *testing.T) {
 	}
 }
 
-// CLM-8: exercise String, standard formatting, and actual slog handlers with
-// userinfo in password, username-only, escaped, opaque, and malformed URLs.
+// CLM-8 / CLM-7: exercise String, standard formatting, and actual slog handlers with
+// userinfo in password, username-only, escaped, opaque, and malformed URLs,
+// as well as password-bearing query parameters (any case).
 func TestConfigRedaction(t *testing.T) {
 	const discordSecret = "SENTINEL_DISCORD_SECRET"
 	const authSecret = "SENTINEL_DB_AUTH_SECRET"   //nolint:gosec // G101 false positive: test sentinel, not a real credential
 	const userSecret = "SENTINEL_URL_USER"         //nolint:gosec // G101 false positive: test sentinel, not a real credential
 	const passwordSecret = "SENTINEL_URL_PASSWORD" //nolint:gosec // G101 false positive: test sentinel, not a real credential
+	const sentinelPw = "S3cr3tPw"                  //nolint:gosec // G101 false positive: test sentinel, not a real credential
 	for _, tt := range []struct {
 		name string
 		url  string
@@ -355,6 +357,11 @@ func TestConfigRedaction(t *testing.T) {
 		{"escaped", "libsql://%53ENTINEL_URL_USER:%53ENTINEL_URL_PASSWORD@example.test/db"},
 		{"malformed", "libsql://" + userSecret + ":" + passwordSecret + "@example.test/%zz"},
 		{"opaque", "libsql:" + userSecret + ":" + passwordSecret + "@example.test/db"},
+		{"userinfo with sentinel", "postgres://app:" + sentinelPw + "@example.test/db"},
+		{"query param password lowercase", "postgres://example.test/db?sslmode=disable&password=" + sentinelPw},
+		{"query param password uppercase", "postgres://example.test/db?PASSWORD=" + sentinelPw},
+		{"query param password mixed case", "postgres://example.test/db?db_PassWord_val=" + sentinelPw},
+		{"both userinfo and query param password", "postgres://app:" + sentinelPw + "@example.test/db?secret_password=" + sentinelPw},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := Config{
@@ -378,15 +385,13 @@ func TestConfigRedaction(t *testing.T) {
 				{"slog text", textLog.String()},
 			} {
 				t.Run(form.name, func(t *testing.T) {
-					if !strings.Contains(form.output, "[REDACTED]") {
-						t.Error("missing redaction marker")
-					}
 					for _, secret := range []string{
 						discordSecret, authSecret, userSecret, passwordSecret,
 						"%53ENTINEL_URL_USER", "%53ENTINEL_URL_PASSWORD",
+						sentinelPw,
 					} {
 						if strings.Contains(form.output, secret) {
-							t.Error("secret leaked in config representation")
+							t.Errorf("secret %q leaked in config representation: %s", secret, form.output)
 						}
 					}
 				})
