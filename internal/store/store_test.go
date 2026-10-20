@@ -256,13 +256,71 @@ func TestMigrationIdempotency(t *testing.T) {
 	s, dsn := openTestStore(t)
 	ctx := t.Context()
 	// A sentinel applied_at makes re-recording detectable without a clock race.
-	if _, err := s.db.ExecContext(ctx, `UPDATE schema_migrations SET applied_at = ?`, 123); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE schema_migrations SET applied_at = $1`, 123); err != nil {
 		t.Fatal(err)
 	}
-	var schemaVersion int
-	if err := s.db.QueryRowContext(ctx, `PRAGMA schema_version`).Scan(&schemaVersion); err != nil {
-		t.Fatal(err)
+
+	type catalogColumn struct {
+		tableName  string
+		columnName string
+		dataType   string
+		isNullable string
 	}
+	type catalogIndex struct {
+		indexName string
+		indexDef  string
+	}
+	type catalogSnapshot struct {
+		columns []catalogColumn
+		indexes []catalogIndex
+	}
+
+	takeSnapshot := func(db *sql.DB) catalogSnapshot {
+		var snap catalogSnapshot
+		colRows, err := db.QueryContext(ctx, `
+			SELECT table_name, column_name, data_type, is_nullable
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			ORDER BY table_name, ordinal_position`)
+		if err != nil {
+			t.Fatalf("catalog snapshot columns: %v", err)
+		}
+		defer colRows.Close()
+		for colRows.Next() {
+			var col catalogColumn
+			if err := colRows.Scan(&col.tableName, &col.columnName, &col.dataType, &col.isNullable); err != nil {
+				t.Fatalf("scanning catalog column: %v", err)
+			}
+			snap.columns = append(snap.columns, col)
+		}
+		if err := colRows.Err(); err != nil {
+			t.Fatalf("catalog column rows: %v", err)
+		}
+
+		idxRows, err := db.QueryContext(ctx, `
+			SELECT indexname, indexdef
+			FROM pg_indexes
+			WHERE schemaname = current_schema()
+			ORDER BY indexname`)
+		if err != nil {
+			t.Fatalf("catalog snapshot indexes: %v", err)
+		}
+		defer idxRows.Close()
+		for idxRows.Next() {
+			var idx catalogIndex
+			if err := idxRows.Scan(&idx.indexName, &idx.indexDef); err != nil {
+				t.Fatalf("scanning catalog index: %v", err)
+			}
+			snap.indexes = append(snap.indexes, idx)
+		}
+		if err := idxRows.Err(); err != nil {
+			t.Fatalf("catalog index rows: %v", err)
+		}
+		return snap
+	}
+
+	before := takeSnapshot(s.db)
+
 	if err := s.migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -275,15 +333,18 @@ func TestMigrationIdempotency(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	var after, count, version, applied int
-	if err := second.db.QueryRowContext(ctx, `PRAGMA schema_version`).Scan(&after); err != nil {
-		t.Fatal(err)
+
+	after := takeSnapshot(second.db)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("catalog snapshot changed across migrate / reopen:\nbefore: %+v\nafter:  %+v", before, after)
 	}
+
+	var count, version, applied int
 	if err := second.db.QueryRowContext(ctx, `SELECT count(*), min(version), min(applied_at) FROM schema_migrations`).Scan(&count, &version, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if after != schemaVersion || count != 1 || version != 1 || applied != 123 {
-		t.Fatalf("migration changed: schema %d -> %d, count=%d version=%d applied=%d", schemaVersion, after, count, version, applied)
+	if count != len(migrations) || version != 1 || applied != 123 {
+		t.Fatalf("schema_migrations changed: count=%d (want %d) version=%d (want 1) applied=%d (want 123)", count, len(migrations), version, applied)
 	}
 }
 

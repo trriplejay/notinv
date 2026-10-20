@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/trriplejay/notinv/internal/storetest"
 )
 
@@ -119,6 +120,37 @@ func currentSchema(t *testing.T, s *Store) string {
 		t.Fatal(err)
 	}
 	return schema
+}
+
+// CLM-2: TestPostgresRunOkRefusesNonBoolean asserts Postgres rejects literal non-boolean ok values.
+func TestPostgresRunOkRefusesNonBoolean(t *testing.T) {
+	dbURL := storetest.DatabaseURL(t)
+	s := openPostgresStore(t, dbURL)
+	ctx := t.Context()
+
+	script := "bad-ok-script"
+	// ok is supplied as the literal 2 so Postgres's type check evaluates it rather than driver conversion.
+	_, err := s.db.ExecContext(ctx, `INSERT INTO runs (key, script, started_at, duration_ms, ok) VALUES ($1, $2, $3, $4, 2)`,
+		"bad-ok-key", script, int64(1000), int64(10))
+	if err == nil {
+		t.Fatal("expected insert with ok=2 to fail, got nil error")
+	}
+
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("expected error to unwrap to *pgconn.PgError, got: %T (%v)", err, err)
+	}
+	if pgErr.Code != "42804" && pgErr.Code != "22P02" {
+		t.Fatalf("expected PgError code 42804 or 22P02, got %q (%s)", pgErr.Code, pgErr.Message)
+	}
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE script = $1`, script).Scan(&count); err != nil {
+		t.Fatalf("querying runs count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 rows for script %s, got %d", script, count)
+	}
 }
 
 // CLM-3: Open on a postgres:// or postgresql:// URL connects, migrates and
