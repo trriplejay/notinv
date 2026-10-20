@@ -56,7 +56,7 @@ func (s *Store) QueryRequests(ctx context.Context, script string, since, until t
 	err := s.withRetry(ctx, func() (err error) {
 		result = nil // Discard partial results before retrying the whole read.
 		rows, err := s.db.QueryContext(ctx, `SELECT script, method, url, started_at, duration_ms, status_code, error
-			FROM requests WHERE script = ? AND started_at >= ? AND started_at <= ? ORDER BY started_at`,
+			FROM requests WHERE script = $1 AND started_at >= $2 AND started_at <= $3 ORDER BY started_at`,
 			script, since.UnixMilli(), until.UnixMilli())
 		if err != nil {
 			return err
@@ -86,7 +86,7 @@ func (s *Store) QueryRuns(ctx context.Context, script string, since, until time.
 	err := s.withRetry(ctx, func() (err error) {
 		result = nil
 		rows, err := s.db.QueryContext(ctx, `SELECT script, started_at, duration_ms, ok, error
-			FROM runs WHERE script = ? AND started_at >= ? AND started_at <= ? ORDER BY started_at`,
+			FROM runs WHERE script = $1 AND started_at >= $2 AND started_at <= $3 ORDER BY started_at`,
 			script, since.UnixMilli(), until.UnixMilli())
 		if err != nil {
 			return err
@@ -114,7 +114,7 @@ func (s *Store) LatestRun(ctx context.Context, script string) (*Run, error) {
 	err := s.withRetry(ctx, func() error {
 		var err error
 		result, err = scanRun(s.db.QueryRowContext(ctx, `SELECT script, started_at, duration_ms, ok, error
-			FROM runs WHERE script = ? ORDER BY started_at DESC LIMIT 1`, script))
+			FROM runs WHERE script = $1 ORDER BY started_at DESC LIMIT 1`, script))
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -129,12 +129,10 @@ func (s *Store) LatestRun(ctx context.Context, script string) (*Run, error) {
 func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 	var r Run
 	var started int64
-	var ok int
-	if err := row.Scan(&r.Script, &started, &r.DurationMs, &ok, &r.Err); err != nil {
+	if err := row.Scan(&r.Script, &started, &r.DurationMs, &r.OK, &r.Err); err != nil {
 		return nil, err
 	}
 	r.StartedAt = time.UnixMilli(started)
-	r.OK = ok == 1
 	return &r, nil
 }
 

@@ -76,6 +76,7 @@ func Load() (*Config, error) {
 		if c.DatabaseAuthToken == "" {
 			return nil, errors.New("DATABASE_AUTH_TOKEN is required for a libsql DATABASE_URL")
 		}
+	case "postgres", "postgresql":
 	default:
 		return nil, errors.New("DATABASE_URL scheme must be file or libsql")
 	}

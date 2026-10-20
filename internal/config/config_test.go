@@ -223,7 +223,8 @@ func TestLoadDatabaseURL(t *testing.T) {
 	}{
 		{"file", "file:./x.db", "", false},
 		{"libsql", "libsql://example.test/db", "test-auth", false},
-		{"postgres", "postgres://example.test/db", "test-auth", true},
+		{"postgres", "postgres://u:p@h:5432/db", "", false},
+		{"postgresql", "postgresql://u:p@h/db", "", false},
 		{"https", "https://example.test/db", "test-auth", true},
 		{"missing scheme", "./x.db", "", true},
 		{"empty", "", "", true},

@@ -8,14 +8,20 @@ import (
 	"net/url"
 	"time"
 
+	// Register the pgx database/sql driver ("pgx") for postgres:// URLs.
+	_ "github.com/jackc/pgx/v5/stdlib"
 	// Register the same driver for local files and remote libSQL databases.
 	_ "github.com/tursodatabase/go-libsql"
 )
 
-// Store persists check results in a local or remote libSQL database.
+// Store persists check results in a Postgres database (or, until that path is
+// retired, a local or remote libSQL database).
 type Store struct {
 	db     *sql.DB
 	remote bool
+	// scheme names the database URL scheme for error messages; empty means
+	// derive it from remote.
+	scheme string
 }
 
 // Request records the result of one HTTP request. Err is nil on success.
@@ -39,22 +45,27 @@ type Run struct {
 }
 
 // Open opens and checks the database, then applies any outstanding migrations.
-// Both file: and libsql: URLs use the libsql driver. Credentials are never
+// postgres: and postgresql: URLs use the pgx driver; file: and libsql: URLs use
+// the libsql driver. Credentials are never
 // printed in returned errors; the original cause remains available via Unwrap.
 func Open(ctx context.Context, databaseURL, authToken string) (*Store, error) {
 	dsn, scheme, err := databaseDSN(databaseURL, authToken)
 	if err != nil {
 		return nil, databaseError("open", scheme, err)
 	}
-	db, err := sql.Open("libsql", dsn)
+	driver := "libsql"
+	if scheme == "postgres" {
+		driver = "pgx"
+	}
+	db, err := sql.Open(driver, dsn)
 	if err != nil {
 		if db != nil {
 			err = errors.Join(err, db.Close())
 		}
 		return nil, databaseError("open", scheme, err)
 	}
-	s := &Store{db: db, remote: scheme == "libsql"}
-	if !s.remote {
+	s := &Store{db: db, remote: scheme == "libsql", scheme: scheme}
+	if scheme == "file" {
 		// SQLite allows one writer at a time, and the driver does not wait on a
 		// held lock, so concurrent writers (script runs and the retention
 		// sweep) fail with "database is locked". A single connection serializes
@@ -77,6 +88,9 @@ func databaseDSN(databaseURL, authToken string) (string, string, error) {
 		return "", "unknown", err
 	}
 	switch u.Scheme {
+	case "postgres", "postgresql":
+		// Postgres carries credentials in the URL itself; authToken is unused.
+		return databaseURL, "postgres", nil
 	case "file":
 		return databaseURL, u.Scheme, nil
 	case "libsql":
@@ -124,9 +138,12 @@ func databaseError(operation, scheme string, err error) error {
 }
 
 func (s *Store) wrap(operation string, err error) error {
-	scheme := "file"
-	if s.remote {
-		scheme = "libsql"
+	scheme := s.scheme
+	if scheme == "" {
+		scheme = "file"
+		if s.remote {
+			scheme = "libsql"
+		}
 	}
 	return databaseError(operation, scheme, err)
 }
@@ -142,7 +159,7 @@ func (s *Store) InsertRequests(ctx context.Context, reqs []Request) error {
 		return inTransaction(ctx, s.db, func(tx *sql.Tx) (err error) {
 			stmt, err := tx.PrepareContext(ctx, `INSERT INTO requests
 				(script, method, url, started_at, duration_ms, status_code, error)
-				VALUES (?, ?, ?, ?, ?, ?, ?)`)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)`)
 			if err != nil {
 				return err
 			}
@@ -159,17 +176,14 @@ func (s *Store) InsertRequests(ctx context.Context, reqs []Request) error {
 	return s.wrap("insert requests", err)
 }
 
-// InsertRun inserts one run, storing OK as 0 or 1 and StartedAt as Unix millis.
-// A remote retry after an ambiguous response can duplicate the record.
+// InsertRun inserts one run, storing OK as a boolean and StartedAt as 64-bit
+// Unix millis. A remote retry after an ambiguous response can duplicate the
+// record.
 func (s *Store) InsertRun(ctx context.Context, run Run) error {
-	ok := 0
-	if run.OK {
-		ok = 1
-	}
 	err := s.withRetry(ctx, func() error {
 		_, err := s.db.ExecContext(ctx, `INSERT INTO runs
-			(script, started_at, duration_ms, ok, error) VALUES (?, ?, ?, ?, ?)`,
-			run.Script, run.StartedAt.UnixMilli(), run.DurationMs, ok, run.Err)
+			(script, started_at, duration_ms, ok, error) VALUES ($1, $2, $3, $4, $5)`,
+			run.Script, run.StartedAt.UnixMilli(), run.DurationMs, run.OK, run.Err)
 		return err
 	})
 	return s.wrap("insert run", err)
