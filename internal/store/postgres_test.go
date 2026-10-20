@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -454,4 +455,113 @@ func TestPostgresConcurrentAccess(t *testing.T) {
 	if max := s.db.Stats().MaxOpenConnections; max == 1 {
 		t.Errorf("MaxOpenConnections = 1 after load, want 0 or > 1")
 	}
+}
+
+// CLM-1: DeleteOlderThan removes rows strictly older than cutoff in bounded
+// batches, leaves rows at or after cutoff intact, drains backlogs larger than
+// a single batch, succeeds on repeat calls, and returns an error wrapping
+// context.Canceled when cancelled.
+func TestPostgresDeleteOlderThan(t *testing.T) {
+	t.Run("boundary", func(t *testing.T) {
+		s := openPostgresStore(t, postgresTestURL(t))
+		ctx := t.Context()
+
+		cutoff := time.UnixMilli(time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC).UnixMilli())
+		stamps := []time.Time{
+			cutoff.Add(-48 * time.Hour),
+			cutoff.Add(-time.Millisecond),
+			cutoff,
+			cutoff.Add(time.Millisecond),
+			cutoff.Add(48 * time.Hour),
+		}
+
+		var reqs []Request
+		for i, ts := range stamps {
+			reqs = append(reqs, Request{Script: "del_test", Method: "GET", URL: fmt.Sprintf("https://example.com/%d", i), StartedAt: ts})
+			if err := s.InsertRun(ctx, Run{Script: "del_test", StartedAt: ts, DurationMs: int64(i), OK: true}); err != nil {
+				t.Fatalf("InsertRun: %v", err)
+			}
+		}
+		if err := s.InsertRequests(ctx, reqs); err != nil {
+			t.Fatalf("InsertRequests: %v", err)
+		}
+
+		if err := s.DeleteOlderThan(ctx, cutoff); err != nil {
+			t.Fatalf("first DeleteOlderThan: %v", err)
+		}
+		if err := s.DeleteOlderThan(ctx, cutoff); err != nil {
+			t.Fatalf("second DeleteOlderThan: %v", err)
+		}
+
+		for _, table := range []string{"requests", "runs"} {
+			var before, at, after int
+			query := fmt.Sprintf(`SELECT
+				count(*) FILTER (WHERE started_at < $1),
+				count(*) FILTER (WHERE started_at = $1),
+				count(*) FILTER (WHERE started_at > $1)
+				FROM %s`, table)
+			if err := s.db.QueryRowContext(ctx, query, cutoff.UnixMilli()).Scan(&before, &at, &after); err != nil {
+				t.Fatalf("%s counts: %v", table, err)
+			}
+			if before != 0 {
+				t.Errorf("%s rows before cutoff = %d, want 0", table, before)
+			}
+			if at != 1 {
+				t.Errorf("%s rows at cutoff = %d, want 1", table, at)
+			}
+			if after != 2 {
+				t.Errorf("%s rows after cutoff = %d, want 2", table, after)
+			}
+		}
+	})
+
+	t.Run("multi-batch", func(t *testing.T) {
+		s := openPostgresStore(t, postgresTestURL(t))
+		ctx := t.Context()
+
+		cutoff := time.UnixMilli(time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC).UnixMilli())
+		count := retentionBatchSize + 100
+		oldTime := cutoff.Add(-time.Hour)
+
+		reqs := make([]Request, count)
+		for i := range count {
+			reqs[i] = Request{
+				Script:    "batch_test",
+				Method:    "GET",
+				URL:       fmt.Sprintf("https://example.com/%d", i),
+				StartedAt: oldTime,
+			}
+		}
+		if err := s.InsertRequests(ctx, reqs); err != nil {
+			t.Fatalf("InsertRequests: %v", err)
+		}
+
+		if err := s.DeleteOlderThan(ctx, cutoff); err != nil {
+			t.Fatalf("DeleteOlderThan: %v", err)
+		}
+
+		var remaining int
+		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM requests`).Scan(&remaining); err != nil {
+			t.Fatalf("query remaining requests: %v", err)
+		}
+		if remaining != 0 {
+			t.Errorf("remaining requests = %d, want 0", remaining)
+		}
+	})
+
+	t.Run("cancelled", func(t *testing.T) {
+		s := openPostgresStore(t, postgresTestURL(t))
+
+		cancelCtx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		cutoff := time.Now()
+		err := s.DeleteOlderThan(cancelCtx, cutoff)
+		if err == nil {
+			t.Fatal("DeleteOlderThan with cancelled context succeeded, want error")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("DeleteOlderThan error = %v, want errors.Is(..., context.Canceled)", err)
+		}
+	})
 }

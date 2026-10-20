@@ -7,23 +7,24 @@ import (
 	"time"
 )
 
-// retentionBatchSize bounds each DELETE so remote (libSQL) transactions stay
-// small; it is a compile-time constant, not configurable via the environment.
+// retentionBatchSize bounds each DELETE so transactions stay small; it is a
+// compile-time constant, not configurable via the environment.
 const retentionBatchSize = 500
 
 // DeleteOlderThan removes every row in requests and runs whose started_at is
 // strictly older than cutoff (measured in Unix milliseconds). Deletes run in
-// bounded batches so no single transaction spans the whole backlog. On a local
-// (file:) store it then issues VACUUM to reclaim space; on a remote (libsql:)
-// store VACUUM is skipped — only the row deletion runs. Rows at or newer than
-// cutoff are never removed.
+// bounded batches so no single transaction spans the whole backlog. Rows at or
+// newer than cutoff are never removed.
 func (s *Store) DeleteOlderThan(ctx context.Context, cutoff time.Time) error {
 	cutoffMs := cutoff.UnixMilli()
 	for _, statement := range []string{
-		`DELETE FROM requests WHERE rowid IN (SELECT rowid FROM requests WHERE started_at < ? LIMIT ?)`,
-		`DELETE FROM runs WHERE rowid IN (SELECT rowid FROM runs WHERE started_at < ? LIMIT ?)`,
+		`DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE started_at < $1 LIMIT $2)`,
+		`DELETE FROM runs WHERE id IN (SELECT id FROM runs WHERE started_at < $1 LIMIT $2)`,
 	} {
 		for {
+			if err := ctx.Err(); err != nil {
+				return s.wrap("delete older than", err)
+			}
 			var deleted int64
 			err := s.withRetry(ctx, func() error {
 				result, err := s.db.ExecContext(ctx, statement, cutoffMs, retentionBatchSize)
@@ -39,11 +40,6 @@ func (s *Store) DeleteOlderThan(ctx context.Context, cutoff time.Time) error {
 			if deleted == 0 {
 				break
 			}
-		}
-	}
-	if !s.remote {
-		if _, err := s.db.ExecContext(ctx, "VACUUM"); err != nil {
-			return s.wrap("delete older than", err)
 		}
 	}
 	return nil
