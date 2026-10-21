@@ -457,17 +457,23 @@ func TestMigrationFailureRollsBack(t *testing.T) {
 }
 
 func TestDatabaseDSN(t *testing.T) {
-	local := "file:./test.db?mode=rwc"
-	if dsn, scheme, err := databaseDSN(local); err != nil || dsn != local || scheme != "file" {
-		t.Fatalf("local DSN = %q, %q, %v", dsn, scheme, err)
+	for _, bad := range []string{
+		"file:./test.db?mode=rwc",
+		"libsql://example.invalid?other=value",
+		"sqlite://./test.db",
+		"mysql://u:p@localhost/db",
+	} {
+		if dsn, scheme, err := databaseDSN(bad); err == nil {
+			t.Fatalf("databaseDSN(%q) accepted, got dsn=%q, scheme=%q", bad, dsn, scheme)
+		}
 	}
-	dsn, scheme, err := databaseDSN("libsql://example.invalid?other=value")
-	if err != nil || scheme != "libsql" || dsn != "libsql://example.invalid?other=value" {
-		t.Fatalf("remote scheme = %q, err = %v", scheme, err)
-	}
-	pg := "postgres://u:p@localhost:5432/notinv?sslmode=disable"
-	if dsn, scheme, err := databaseDSN(pg); err != nil || dsn != pg || scheme != "postgres" {
-		t.Fatalf("postgres DSN = %q, %q, %v", dsn, scheme, err)
+	for _, pg := range []string{
+		"postgres://u:p@localhost:5432/notinv?sslmode=disable",
+		"postgresql://u:p@localhost:5432/notinv?sslmode=disable",
+	} {
+		if dsn, scheme, err := databaseDSN(pg); err != nil || dsn != pg || scheme != "postgres" {
+			t.Fatalf("postgres DSN = %q, %q, %v", dsn, scheme, err)
+		}
 	}
 }
 

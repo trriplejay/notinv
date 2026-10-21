@@ -43,13 +43,11 @@ func TestPing(t *testing.T) {
 	failure := errors.New("private driver detail")
 	for _, tc := range []struct {
 		name       string
-		remote     bool
 		err        error
 		wantScheme string
 	}{
-		{"success", false, nil, "file"},
-		{"local failure", false, failure, "file"},
-		{"remote failure", true, failure, "libsql"},
+		{"success", nil, "postgres"},
+		{"failure", failure, "postgres"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			conn := &pingConn{err: tc.err}
@@ -59,7 +57,7 @@ func TestPing(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			s := &Store{db: db, remote: tc.remote}
+			s := &Store{db: db}
 			err := s.Ping(t.Context())
 			if !errors.Is(err, tc.err) || conn.calls != 1 || conn.ctx != t.Context() {
 				t.Fatalf("Ping = %v, calls = %d, context = %v", err, conn.calls, conn.ctx)

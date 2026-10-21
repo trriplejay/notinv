@@ -12,8 +12,6 @@ import (
 
 	// Register the pgx database/sql driver ("pgx") for postgres:// URLs.
 	_ "github.com/jackc/pgx/v5/stdlib"
-	// Register the same driver for local files and remote libSQL databases.
-	_ "github.com/tursodatabase/go-libsql"
 )
 
 // RandomKey returns a cryptographically random 16-byte hex record key.
@@ -25,13 +23,9 @@ func RandomKey() string {
 	return hex.EncodeToString(b[:])
 }
 
-// Store persists check results in a Postgres database (or, until that path is
-// retired, a local or remote libSQL database).
+// Store persists check results in a Postgres database.
 type Store struct {
 	db     *sql.DB
-	remote bool
-	// scheme names the database URL scheme for error messages; empty means
-	// derive it from remote.
 	scheme string
 }
 
@@ -65,34 +59,21 @@ var (
 )
 
 // Open opens and checks the database, then applies any outstanding migrations.
-// postgres: and postgresql: URLs use the pgx driver; file: and libsql: URLs use
-// the libsql driver. Credentials are never
+// postgres: and postgresql: URLs use the pgx driver. Credentials are never
 // printed in returned errors; the original cause remains available via Unwrap.
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	dsn, scheme, err := databaseDSN(databaseURL)
 	if err != nil {
 		return nil, databaseError("open", scheme, err)
 	}
-	driver := "libsql"
-	if scheme == "postgres" {
-		driver = "pgx"
-	}
-	db, err := sql.Open(driver, dsn)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		if db != nil {
 			err = errors.Join(err, db.Close())
 		}
 		return nil, databaseError("open", scheme, err)
 	}
-	s := &Store{db: db, remote: scheme == "libsql", scheme: scheme}
-	if scheme == "file" {
-		// SQLite allows one writer at a time, and the driver does not wait on a
-		// held lock, so concurrent writers (script runs and the retention
-		// sweep) fail with "database is locked". A single connection serializes
-		// access in-process instead. No store method nests queries, so this
-		// cannot deadlock.
-		db.SetMaxOpenConns(1)
-	}
+	s := &Store{db: db, scheme: scheme}
 
 	start := time.Now()
 	delay := openInitialBackoff
@@ -152,10 +133,6 @@ func databaseDSN(databaseURL string) (string, string, error) {
 	case "postgres", "postgresql":
 		// Postgres carries credentials in the URL itself.
 		return databaseURL, "postgres", nil
-	case "file":
-		return databaseURL, u.Scheme, nil
-	case "libsql":
-		return u.String(), u.Scheme, nil
 	default:
 		return "", "unknown", errors.New("unsupported database scheme")
 	}
@@ -196,10 +173,7 @@ func databaseError(operation, scheme string, err error) error {
 func (s *Store) wrap(operation string, err error) error {
 	scheme := s.scheme
 	if scheme == "" {
-		scheme = "file"
-		if s.remote {
-			scheme = "libsql"
-		}
+		scheme = "postgres"
 	}
 	return databaseError(operation, scheme, err)
 }

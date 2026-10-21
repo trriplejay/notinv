@@ -32,8 +32,6 @@ jobs:
         with:
           version: v2.15.0
       - name: make build
-        env:
-          CGO_ENABLED: 1
         run: make build
       - name: make ci
         env:

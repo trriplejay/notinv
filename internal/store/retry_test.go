@@ -17,7 +17,7 @@ import (
 // CLM-1: An integration test that terminates the store's backends with
 // pg_terminate_backend before InsertRun. The run row must still be written once,
 // and a CHECK-constraint failure must be attempted exactly once. The test goes
-// red when the !s.remote short-circuit is restored.
+// red when driver retry is not performed.
 func TestRemoteOperationsRetryDriverFailures(t *testing.T) {
 	dbURL := storetest.DatabaseURL(t)
 	s := openPostgresStore(t, dbURL)
