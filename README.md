@@ -55,6 +55,14 @@ DATABASE_URL=postgres://postgres:postgres@localhost:5432/notinv?sslmode=disable
 
 The service opens the database and applies its schema migrations at startup; you do not need to create tables by hand.
 
+### Upgrading from SQLite/Turso
+
+- notinv now requires a Postgres `DATABASE_URL` (`postgres://` or `postgresql://`).
+- A `file:` or `libsql:` `DATABASE_URL` stops notinv at startup.
+- `DATABASE_AUTH_TOKEN` is no longer used (remove it from your .env).
+- Existing SQLite/Turso data is not carried over or migrated.
+- The published `trriplejay/notinv:latest` image carries this change.
+
 ## 4. Environment variable reference
 
 These are the **eight central service settings**, matching `.env.example` and
@@ -237,6 +245,14 @@ watching it: saving a `.go` file or anything under `web/static` rebuilds and
 restarts the service. `.env` is loaded as usual. Only the Go build and
 module caches are kept in named volumes so rebuilds stay fast; remove them with
 `docker compose -f docker-compose.dev.yml down -v`.
+
+`make dev` uses the `DATABASE_URL` from `.env`. To reach a Postgres on your own
+machine, use the host `host.docker.internal`, for example
+`postgres://user:password@host.docker.internal:5432/notinv`, because
+`localhost` inside the container is the container itself
+(`docker-compose.dev.yml` maps `host.docker.internal` to the host gateway). The
+host Postgres must also accept connections from the Docker network
+(`listen_addresses` / `pg_hba.conf`), not only from 127.0.0.1.
 
 ## 7. Trigger your first Discord DM
 

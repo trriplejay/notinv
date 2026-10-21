@@ -35,7 +35,7 @@ fmt:
 run: build
 	./$(BIN_DIR)/$(BINARY)
 
-# Hot-reloading dev container; the database is discarded when it exits.
+# Hot-reloading dev container; uses DATABASE_URL from .env.
 dev:
 	docker compose -f docker-compose.dev.yml run --rm --build --service-ports notinv
 
