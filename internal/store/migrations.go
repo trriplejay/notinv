@@ -51,25 +51,17 @@ var migrations = []struct {
 // and each version is applied exactly once.
 func (s *Store) migrate(ctx context.Context) error {
 	return inTransaction(ctx, s.db, func(tx *sql.Tx) error {
-		if s.scheme == "postgres" {
-			if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLockKey); err != nil {
-				return err
-			}
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLockKey); err != nil {
+			return err
 		}
-		placeholder := "$1"
-		if s.scheme != "postgres" {
-			placeholder = "?"
-		}
-		createTable := `CREATE TABLE IF NOT EXISTS schema_migrations (
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 			version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL
-		)`
-		if _, err := tx.ExecContext(ctx, createTable); err != nil {
+		)`); err != nil {
 			return err
 		}
 		for _, migration := range migrations {
 			var applied int
-			query := `SELECT version FROM schema_migrations WHERE version = ` + placeholder
-			err := tx.QueryRowContext(ctx, query, migration.version).Scan(&applied)
+			err := tx.QueryRowContext(ctx, `SELECT version FROM schema_migrations WHERE version = $1`, migration.version).Scan(&applied)
 			if err == nil {
 				continue
 			}
@@ -81,11 +73,8 @@ func (s *Store) migrate(ctx context.Context) error {
 					return err
 				}
 			}
-			insert := `INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2)`
-			if s.scheme != "postgres" {
-				insert = `INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`
-			}
-			if _, err := tx.ExecContext(ctx, insert, migration.version, time.Now().UnixMilli()); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2)`,
+				migration.version, time.Now().UnixMilli()); err != nil {
 				return err
 			}
 		}

@@ -71,7 +71,7 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("Load with unset DATABASE_URL returned non-nil config: %+v", got)
 	}
 
-	const postgresURL = "postgres://u:p@localhost:5432/notinv"
+	const postgresURL = "postgres://u:p@localhost:5432/notinv" //nolint:gosec // G101 false positive: test URL, not a real credential
 	t.Setenv("DATABASE_URL", postgresURL)
 	got, err = Load()
 	if err != nil {
