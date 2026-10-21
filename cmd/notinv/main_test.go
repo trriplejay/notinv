@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,6 +25,7 @@ import (
 	"github.com/trriplejay/notinv/internal/rc"
 	"github.com/trriplejay/notinv/internal/runner"
 	"github.com/trriplejay/notinv/internal/store"
+	"github.com/trriplejay/notinv/internal/storetest"
 )
 
 // TestDefaultScripts verifies that the service's runnable set includes the
@@ -172,7 +174,7 @@ func TestWarnIfDryRun(t *testing.T) {
 	}
 }
 
-// CLM-13: the repository's example is valid dotenv with all nine settings.
+// CLM-1, CLM-13: the repository's example is valid dotenv with all eight settings and a Postgres DATABASE_URL.
 func TestEnvExampleParses(t *testing.T) {
 	values, err := godotenv.Read("../../.env.example")
 	if err != nil {
@@ -185,7 +187,6 @@ func TestEnvExampleParses(t *testing.T) {
 		"NOTINV_RETENTION_DAYS",
 		"NOTINV_LOG_LEVEL",
 		"NOTINV_LOG_FORMAT",
-		"DATABASE_AUTH_TOKEN",
 		"NOTINV_DISCORD_TOKEN",
 		"NOTINV_DISCORD_USER_ID",
 	}
@@ -196,6 +197,13 @@ func TestEnvExampleParses(t *testing.T) {
 		if _, ok := values[key]; !ok {
 			t.Errorf("example missing %s", key)
 		}
+	}
+	u, err := url.Parse(values["DATABASE_URL"])
+	if err != nil {
+		t.Fatalf("parse DATABASE_URL: %v", err)
+	}
+	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
+		t.Errorf("example DATABASE_URL scheme = %q, want postgres or postgresql", u.Scheme)
 	}
 }
 
@@ -313,8 +321,11 @@ func TestOrchestrateShutdownDrain(t *testing.T) {
 
 func TestShutdownBudget(t *testing.T) {
 	budget := defaultShutdownBudget()
-	if budget.overall != 8*time.Second || budget.drain != 5*time.Second {
+	if budget.overall != 7*time.Second || budget.drain != 5*time.Second {
 		t.Fatalf("production budget = %+v", budget)
+	}
+	if total := budget.overall + rc.FinalFlushTimeout; total >= 10*time.Second {
+		t.Errorf("overall budget plus flush bound = %v, want < 10s", total)
 	}
 	if total := budget.drain + budget.httpShutdown(budget.drain); total > budget.overall || total >= 10*time.Second {
 		t.Errorf("shutdown timeouts total %v", total)
@@ -519,7 +530,7 @@ func TestServicesRecordScriptRequests(t *testing.T) {
 		w.WriteHeader(http.StatusTeapot)
 	}))
 	defer server.Close()
-	st, err := store.Open(t.Context(), "file:"+filepath.Join(t.TempDir(), "test.db"), "")
+	st, err := store.Open(t.Context(), storetest.DatabaseURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

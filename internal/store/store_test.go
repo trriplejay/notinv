@@ -6,18 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/trriplejay/notinv/internal/storetest"
 )
 
 func openTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
-	dsn := "file:" + filepath.Join(t.TempDir(), "test.db")
-	s, err := Open(t.Context(), dsn, "")
+	dsn := storetest.DatabaseURL(t)
+	s, err := Open(t.Context(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,12 +60,12 @@ func TestDeleteOlderThan(t *testing.T) {
 			statement string
 			want      int
 		}{
-			{`SELECT count(*) FROM requests WHERE started_at < ?`, 0},
-			{`SELECT count(*) FROM runs WHERE started_at < ?`, 0},
-			{`SELECT count(*) FROM requests WHERE started_at = ?`, 1},
-			{`SELECT count(*) FROM runs WHERE started_at = ?`, 1},
-			{`SELECT count(*) FROM requests WHERE started_at > ?`, 2},
-			{`SELECT count(*) FROM runs WHERE started_at > ?`, 2},
+			{`SELECT count(*) FROM requests WHERE started_at < $1`, 0},
+			{`SELECT count(*) FROM runs WHERE started_at < $1`, 0},
+			{`SELECT count(*) FROM requests WHERE started_at = $1`, 1},
+			{`SELECT count(*) FROM runs WHERE started_at = $1`, 1},
+			{`SELECT count(*) FROM requests WHERE started_at > $1`, 2},
+			{`SELECT count(*) FROM runs WHERE started_at > $1`, 2},
 		} {
 			var count int
 			if err := s.db.QueryRowContext(ctx, query.statement, cutoff.UnixMilli()).Scan(&count); err != nil {
@@ -106,31 +107,6 @@ func TestDeleteOlderThanCanceled(t *testing.T) {
 	cancel()
 	if err := s.DeleteOlderThan(ctx, time.UnixMilli(0)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected wrapped cancellation, got %v", err)
-	}
-}
-
-// Script runs and the retention sweep write concurrently; a local file store
-// must serialize them rather than fail with "database is locked".
-func TestLocalConcurrentWrites(t *testing.T) {
-	s, _ := openTestStore(t)
-	ctx := t.Context()
-	for i := range 20 {
-		var wg sync.WaitGroup
-		errs := make([]error, 4)
-		wg.Add(len(errs))
-		go func() { defer wg.Done(); errs[0] = s.DeleteOlderThan(ctx, time.Now().AddDate(0, 0, -30)) }()
-		go func() { defer wg.Done(); errs[1] = s.InsertRun(ctx, Run{Script: "a", StartedAt: time.Now(), OK: true}) }()
-		go func() {
-			defer wg.Done()
-			errs[2] = s.InsertRequests(ctx, []Request{{Script: "b", StartedAt: time.Now()}, {Script: "b", StartedAt: time.Now()}})
-		}()
-		go func() { defer wg.Done(); _, errs[3] = s.ListScripts(ctx) }()
-		wg.Wait()
-		for op, err := range errs {
-			if err != nil {
-				t.Fatalf("round %d, op %d: %v", i, op, errors.Unwrap(errors.Unwrap(err)))
-			}
-		}
 	}
 }
 
@@ -227,24 +203,24 @@ func TestRoundTripAndQueries(t *testing.T) {
 
 	var started int64
 	var storedType string
-	if err := s.db.QueryRowContext(ctx, `SELECT started_at, typeof(started_at) FROM requests WHERE script = ? ORDER BY started_at LIMIT 1`, script).Scan(&started, &storedType); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT started_at, pg_typeof(started_at)::text FROM requests WHERE script = $1 ORDER BY started_at LIMIT 1`, script).Scan(&started, &storedType); err != nil {
 		t.Fatal(err)
 	}
-	if started != 1735779845123 || storedType != "integer" {
+	if started != 1735779845123 || storedType != "bigint" {
 		t.Fatalf("persisted request start = %d (%s)", started, storedType)
 	}
-	var ok int
-	if err := s.db.QueryRowContext(ctx, `SELECT started_at, typeof(started_at), ok FROM runs WHERE script = ? ORDER BY started_at LIMIT 1`, script).Scan(&started, &storedType, &ok); err != nil {
+	var ok bool
+	if err := s.db.QueryRowContext(ctx, `SELECT started_at, pg_typeof(started_at)::text, ok FROM runs WHERE script = $1 ORDER BY started_at LIMIT 1`, script).Scan(&started, &storedType, &ok); err != nil {
 		t.Fatal(err)
 	}
-	if started != 1735779845123 || storedType != "integer" || ok != 1 {
-		t.Fatalf("persisted run = %d (%s), ok = %d", started, storedType, ok)
+	if started != 1735779845123 || storedType != "bigint" || !ok {
+		t.Fatalf("persisted run = %d (%s), ok = %t", started, storedType, ok)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT ok FROM runs WHERE script = ? AND started_at = ?`, script, int64(1735779846123)).Scan(&ok); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT ok FROM runs WHERE script = $1 AND started_at = $2`, script, int64(1735779846123)).Scan(&ok); err != nil {
 		t.Fatal(err)
 	}
-	if ok != 0 {
-		t.Fatalf("false persisted as %d", ok)
+	if ok {
+		t.Fatal("false persisted as true")
 	}
 }
 
@@ -281,17 +257,75 @@ func TestMigrationIdempotency(t *testing.T) {
 	s, dsn := openTestStore(t)
 	ctx := t.Context()
 	// A sentinel applied_at makes re-recording detectable without a clock race.
-	if _, err := s.db.ExecContext(ctx, `UPDATE schema_migrations SET applied_at = ?`, 123); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE schema_migrations SET applied_at = $1`, 123); err != nil {
 		t.Fatal(err)
 	}
-	var schemaVersion int
-	if err := s.db.QueryRowContext(ctx, `PRAGMA schema_version`).Scan(&schemaVersion); err != nil {
-		t.Fatal(err)
+
+	type catalogColumn struct {
+		tableName  string
+		columnName string
+		dataType   string
+		isNullable string
 	}
+	type catalogIndex struct {
+		indexName string
+		indexDef  string
+	}
+	type catalogSnapshot struct {
+		columns []catalogColumn
+		indexes []catalogIndex
+	}
+
+	takeSnapshot := func(db *sql.DB) catalogSnapshot {
+		var snap catalogSnapshot
+		colRows, err := db.QueryContext(ctx, `
+			SELECT table_name, column_name, data_type, is_nullable
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			ORDER BY table_name, ordinal_position`)
+		if err != nil {
+			t.Fatalf("catalog snapshot columns: %v", err)
+		}
+		defer colRows.Close()
+		for colRows.Next() {
+			var col catalogColumn
+			if err := colRows.Scan(&col.tableName, &col.columnName, &col.dataType, &col.isNullable); err != nil {
+				t.Fatalf("scanning catalog column: %v", err)
+			}
+			snap.columns = append(snap.columns, col)
+		}
+		if err := colRows.Err(); err != nil {
+			t.Fatalf("catalog column rows: %v", err)
+		}
+
+		idxRows, err := db.QueryContext(ctx, `
+			SELECT indexname, indexdef
+			FROM pg_indexes
+			WHERE schemaname = current_schema()
+			ORDER BY indexname`)
+		if err != nil {
+			t.Fatalf("catalog snapshot indexes: %v", err)
+		}
+		defer idxRows.Close()
+		for idxRows.Next() {
+			var idx catalogIndex
+			if err := idxRows.Scan(&idx.indexName, &idx.indexDef); err != nil {
+				t.Fatalf("scanning catalog index: %v", err)
+			}
+			snap.indexes = append(snap.indexes, idx)
+		}
+		if err := idxRows.Err(); err != nil {
+			t.Fatalf("catalog index rows: %v", err)
+		}
+		return snap
+	}
+
+	before := takeSnapshot(s.db)
+
 	if err := s.migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	second, err := Open(ctx, dsn, "")
+	second, err := Open(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,28 +334,37 @@ func TestMigrationIdempotency(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	var after, count, version, applied int
-	if err := second.db.QueryRowContext(ctx, `PRAGMA schema_version`).Scan(&after); err != nil {
-		t.Fatal(err)
+
+	after := takeSnapshot(second.db)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("catalog snapshot changed across migrate / reopen:\nbefore: %+v\nafter:  %+v", before, after)
 	}
+
+	var count, version, applied int
 	if err := second.db.QueryRowContext(ctx, `SELECT count(*), min(version), min(applied_at) FROM schema_migrations`).Scan(&count, &version, &applied); err != nil {
 		t.Fatal(err)
 	}
-	if after != schemaVersion || count != 1 || version != 1 || applied != 123 {
-		t.Fatalf("migration changed: schema %d -> %d, count=%d version=%d applied=%d", schemaVersion, after, count, version, applied)
+	if count != len(migrations) || version != 1 || applied != 123 {
+		t.Fatalf("schema_migrations changed: count=%d (want %d) version=%d (want 1) applied=%d (want 123)", count, len(migrations), version, applied)
 	}
 }
 
 func TestBatchRollback(t *testing.T) {
 	s, _ := openTestStore(t)
 	ctx := t.Context()
-	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER reject_request BEFORE INSERT ON requests
-		WHEN NEW.method = 'FAIL' BEGIN SELECT RAISE(ABORT, 'rejected'); END`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE requests ADD CONSTRAINT test_check_method CHECK (method <> 'FAIL')`); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_, _ = s.db.ExecContext(context.Background(), `ALTER TABLE requests DROP CONSTRAINT IF EXISTS test_check_method`)
+	})
 	err := s.InsertRequests(ctx, []Request{{Script: "batch", Method: "GET"}, {Script: "batch", Method: "FAIL"}})
 	if err == nil {
 		t.Fatal("expected second insert to fail")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Fatalf("expected 23514 check_violation, got %v", err)
 	}
 	var count int
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM requests`).Scan(&count); err != nil {
@@ -339,13 +382,12 @@ func TestOpenFailure(t *testing.T) {
 		dsn    string
 		scheme string
 	}{
-		{"missing parent", "file:" + filepath.Join(t.TempDir(), token, "missing", "test.db"), "file"},
 		{"invalid URL", "libsql://example.invalid/%" + token, "unknown"},
 		{"unsupported scheme", token + "://example.invalid", "unknown"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := Open(t.Context(), tc.dsn, token)
+			s, err := Open(t.Context(), tc.dsn)
 			if s != nil {
 				if closeErr := s.Close(); closeErr != nil {
 					t.Error(closeErr)
@@ -365,7 +407,7 @@ func TestOpenFailure(t *testing.T) {
 func TestCanceledOpen(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	s, err := Open(ctx, "file:"+filepath.Join(t.TempDir(), "test.db"), "")
+	s, err := Open(ctx, storetest.DatabaseURL(t))
 	if s != nil {
 		if closeErr := s.Close(); closeErr != nil {
 			t.Error(closeErr)
@@ -378,8 +420,8 @@ func TestCanceledOpen(t *testing.T) {
 }
 
 func TestMigrationFailureRollsBack(t *testing.T) {
-	dsn := "file:" + filepath.Join(t.TempDir(), "test.db")
-	db, err := sql.Open("libsql", dsn)
+	dsn := storetest.DatabaseURL(t)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,11 +430,13 @@ func TestMigrationFailureRollsBack(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	// Conflict with the last table creation: earlier requests DDL must roll back.
+	// CREATE TABLE IF NOT EXISTS runs accepts this existing table, but the
+	// later CREATE UNIQUE INDEX idx_runs_key ON runs(key) fails because it has
+	// no key column. The requests DDL that ran before it must roll back.
 	if _, err := db.ExecContext(t.Context(), `CREATE TABLE runs (existing TEXT)`); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(t.Context(), dsn, "")
+	s, err := Open(t.Context(), dsn)
 	if s != nil {
 		if closeErr := s.Close(); closeErr != nil {
 			t.Error(closeErr)
@@ -403,7 +447,8 @@ func TestMigrationFailureRollsBack(t *testing.T) {
 		t.Fatalf("expected wrapped migration error: %v", err)
 	}
 	var count int
-	if err := db.QueryRowContext(t.Context(), `SELECT count(*) FROM sqlite_master WHERE name IN ('requests', 'schema_migrations')`).Scan(&count); err != nil {
+	if err := db.QueryRowContext(t.Context(), `SELECT count(*) FROM information_schema.tables
+		WHERE table_schema = current_schema() AND table_name IN ('requests', 'schema_migrations')`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
@@ -412,30 +457,29 @@ func TestMigrationFailureRollsBack(t *testing.T) {
 }
 
 func TestDatabaseDSN(t *testing.T) {
-	const token = "secret +&/?=" //nolint:gosec // G101 false positive: fake auth token test fixture, not a real credential
-	local := "file:./test.db?mode=rwc"
-	if dsn, scheme, err := databaseDSN(local, token); err != nil || dsn != local || scheme != "file" {
-		t.Fatalf("local DSN = %q, %q, %v", dsn, scheme, err)
+	for _, bad := range []string{
+		"file:./test.db?mode=rwc",
+		"libsql://example.invalid?other=value",
+		"sqlite://./test.db",
+		"mysql://u:p@localhost/db",
+	} {
+		if dsn, scheme, err := databaseDSN(bad); err == nil {
+			t.Fatalf("databaseDSN(%q) accepted, got dsn=%q, scheme=%q", bad, dsn, scheme)
+		}
 	}
-	dsn, scheme, err := databaseDSN("libsql://example.invalid?other=value&authToken=old", token)
-	if err != nil || scheme != "libsql" {
-		t.Fatalf("remote scheme = %q, err = %v", scheme, err)
-	}
-	u, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if u.Query().Get("authToken") != token || u.Query().Get("other") != "value" || len(u.Query()["authToken"]) != 1 {
-		t.Fatal("auth token not encoded or existing query not preserved")
-	}
-	if dsn, _, err := databaseDSN("libsql://example.invalid?other=value", ""); err != nil || dsn != "libsql://example.invalid?other=value" {
-		t.Fatal("empty token changed DSN")
+	for _, pg := range []string{
+		"postgres://u:p@localhost:5432/notinv?sslmode=disable",
+		"postgresql://u:p@localhost:5432/notinv?sslmode=disable",
+	} {
+		if dsn, scheme, err := databaseDSN(pg); err != nil || dsn != pg || scheme != "postgres" {
+			t.Fatalf("postgres DSN = %q, %q, %v", dsn, scheme, err)
+		}
 	}
 }
 
 func TestPrivateErrorsPreserveCause(t *testing.T) {
-	cause := &url.Error{Op: "connect", URL: "libsql://host?authToken=private", Err: context.DeadlineExceeded}
-	err := databaseError("query", "libsql", cause)
+	cause := &url.Error{Op: "connect", URL: "postgres://u:private@host", Err: context.DeadlineExceeded}
+	err := databaseError("query", "postgres", cause)
 	if strings.Contains(err.Error(), "private") || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("redaction or cause preservation failed: %v", err)
 	}

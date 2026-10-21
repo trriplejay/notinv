@@ -29,17 +29,20 @@ var testNow = time.Date(2026, time.October, 5, 12, 0, 0, 0, time.UTC)
 func fixedNow() time.Time { return testNow }
 
 type fakeStore struct {
-	runs        []store.Run
-	requests    []store.Request
-	latestErr   error
-	runsErr     error
-	requestsErr error
-	pingErr     error
-	pingCalls   int
-	ctx         context.Context
-	script      string
-	since       time.Time
-	until       time.Time
+	runs           []store.Run
+	requests       []store.Request
+	latestErr      error
+	runsErr        error
+	requestsErr    error
+	pingErr        error
+	pingCalls      int
+	blockUntilDone bool
+	sawDeadline    bool
+	deadlineSeen   time.Duration
+	ctx            context.Context
+	script         string
+	since          time.Time
+	until          time.Time
 }
 
 func (f *fakeStore) LatestRun(ctx context.Context, script string) (*store.Run, error) {
@@ -80,6 +83,14 @@ func (f *fakeStore) QueryRequests(ctx context.Context, script string, since, unt
 func (f *fakeStore) Ping(ctx context.Context) error {
 	f.ctx = ctx
 	f.pingCalls++
+	if d, ok := ctx.Deadline(); ok {
+		f.sawDeadline = true
+		f.deadlineSeen = time.Until(d)
+	}
+	if f.blockUntilDone {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return f.pingErr
 }
 
@@ -351,21 +362,31 @@ func TestRequestsBoundedByDistinctURLs(t *testing.T) {
 	assertJSON(t, w, `[{"url":"url-0","count":100,"errors":0,"avgLatency":9},{"url":"url-1","count":100,"errors":0,"avgLatency":9},{"url":"url-2","count":100,"errors":0,"avgLatency":9}]`)
 }
 
-// CLM-8: health depends on the ping result and forwards the request context.
+// CLM-6: health pings under a deadline shorter than 2s (about 1.5s), yielding 503 on timeout or error and 200 on success.
 func TestHealthPing(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		err    error
+		block  bool
 		status int
 	}{
-		{"reachable", nil, http.StatusOK},
-		{"unreachable", errors.New("private database detail"), http.StatusServiceUnavailable},
+		{"reachable", nil, false, http.StatusOK},
+		{"unreachable", errors.New("private database detail"), false, http.StatusServiceUnavailable},
+		{"timeout", nil, true, http.StatusServiceUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := &fakeStore{pingErr: tc.err}
+			f := &fakeStore{pingErr: tc.err, blockUntilDone: tc.block}
+			start := time.Now()
 			w := serve(t, "GET /healthz", "/healthz", NewHealthHandler(f))
-			if w.Code != tc.status || f.pingCalls != 1 || f.ctx != t.Context() {
-				t.Fatalf("status=%d, calls=%d, context=%v", w.Code, f.pingCalls, f.ctx)
+			elapsed := time.Since(start)
+			if elapsed >= 2*time.Second {
+				t.Fatalf("GET /healthz took %v, want under 2s", elapsed)
+			}
+			if w.Code != tc.status || f.pingCalls != 1 {
+				t.Fatalf("status=%d, calls=%d", w.Code, f.pingCalls)
+			}
+			if !f.sawDeadline || f.deadlineSeen <= 0 || f.deadlineSeen >= 2*time.Second {
+				t.Fatalf("stub saw deadline %v (ok=%v), want under 2s and > 0", f.deadlineSeen, f.sawDeadline)
 			}
 			if strings.Contains(w.Body.String(), "private") {
 				t.Error("response leaked database error")

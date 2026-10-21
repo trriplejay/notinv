@@ -5,14 +5,14 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/trriplejay/notinv/internal/store"
+	"github.com/trriplejay/notinv/internal/storetest"
 )
 
-// TestDashboardBrowserServer is the opt-in real API/SQLite assembly used by
+// TestDashboardBrowserServer is the opt-in real API/Postgres assembly used by
 // web/tests/dashboard.test.cjs. Ordinary Go runs exercise the finite route test.
 func TestDashboardBrowserServer(t *testing.T) {
 	listen := os.Getenv("NOTINV_BROWSER_TEST_LISTEN")
@@ -20,7 +20,7 @@ func TestDashboardBrowserServer(t *testing.T) {
 		return
 	}
 	ctx := context.Background()
-	st, err := store.Open(ctx, "file:"+filepath.Join(t.TempDir(), "browser.db"), "")
+	st, err := store.Open(ctx, storetest.DatabaseURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

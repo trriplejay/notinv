@@ -7,26 +7,27 @@ import (
 	"time"
 )
 
-// retentionBatchSize bounds each DELETE so remote (libSQL) transactions stay
-// small; it is a compile-time constant, not configurable via the environment.
+// retentionBatchSize bounds each DELETE so transactions stay small; it is a
+// compile-time constant, not configurable via the environment.
 const retentionBatchSize = 500
 
 // DeleteOlderThan removes every row in requests and runs whose started_at is
 // strictly older than cutoff (measured in Unix milliseconds). Deletes run in
-// bounded batches so no single transaction spans the whole backlog. On a local
-// (file:) store it then issues VACUUM to reclaim space; on a remote (libsql:)
-// store VACUUM is skipped — only the row deletion runs. Rows at or newer than
-// cutoff are never removed.
+// bounded batches so no single transaction spans the whole backlog. Rows at or
+// newer than cutoff are never removed.
 func (s *Store) DeleteOlderThan(ctx context.Context, cutoff time.Time) error {
 	cutoffMs := cutoff.UnixMilli()
 	for _, statement := range []string{
-		`DELETE FROM requests WHERE rowid IN (SELECT rowid FROM requests WHERE started_at < ? LIMIT ?)`,
-		`DELETE FROM runs WHERE rowid IN (SELECT rowid FROM runs WHERE started_at < ? LIMIT ?)`,
+		`DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE started_at < $1 LIMIT $2)`,
+		`DELETE FROM runs WHERE id IN (SELECT id FROM runs WHERE started_at < $1 LIMIT $2)`,
 	} {
 		for {
+			if err := ctx.Err(); err != nil {
+				return s.wrap("delete older than", err)
+			}
 			var deleted int64
-			err := s.withRetry(ctx, func() error {
-				result, err := s.db.ExecContext(ctx, statement, cutoffMs, retentionBatchSize)
+			err := s.withRetry(ctx, func(attemptCtx context.Context) error {
+				result, err := s.db.ExecContext(attemptCtx, statement, cutoffMs, retentionBatchSize)
 				if err != nil {
 					return err
 				}
@@ -41,11 +42,6 @@ func (s *Store) DeleteOlderThan(ctx context.Context, cutoff time.Time) error {
 			}
 		}
 	}
-	if !s.remote {
-		if _, err := s.db.ExecContext(ctx, "VACUUM"); err != nil {
-			return s.wrap("delete older than", err)
-		}
-	}
 	return nil
 }
 
@@ -53,10 +49,10 @@ func (s *Store) DeleteOlderThan(ctx context.Context, cutoff time.Time) error {
 // Both bounds are inclusive and compared at Unix-millisecond precision.
 func (s *Store) QueryRequests(ctx context.Context, script string, since, until time.Time) ([]Request, error) {
 	var result []Request
-	err := s.withRetry(ctx, func() (err error) {
+	err := s.withRetry(ctx, func(attemptCtx context.Context) (err error) {
 		result = nil // Discard partial results before retrying the whole read.
-		rows, err := s.db.QueryContext(ctx, `SELECT script, method, url, started_at, duration_ms, status_code, error
-			FROM requests WHERE script = ? AND started_at >= ? AND started_at <= ? ORDER BY started_at`,
+		rows, err := s.db.QueryContext(attemptCtx, `SELECT script, method, url, started_at, duration_ms, status_code, error
+			FROM requests WHERE script = $1 AND started_at >= $2 AND started_at <= $3 ORDER BY started_at`,
 			script, since.UnixMilli(), until.UnixMilli())
 		if err != nil {
 			return err
@@ -83,10 +79,10 @@ func (s *Store) QueryRequests(ctx context.Context, script string, since, until t
 // Both bounds are inclusive and compared at Unix-millisecond precision.
 func (s *Store) QueryRuns(ctx context.Context, script string, since, until time.Time) ([]Run, error) {
 	var result []Run
-	err := s.withRetry(ctx, func() (err error) {
+	err := s.withRetry(ctx, func(attemptCtx context.Context) (err error) {
 		result = nil
-		rows, err := s.db.QueryContext(ctx, `SELECT script, started_at, duration_ms, ok, error
-			FROM runs WHERE script = ? AND started_at >= ? AND started_at <= ? ORDER BY started_at`,
+		rows, err := s.db.QueryContext(attemptCtx, `SELECT script, started_at, duration_ms, ok, error
+			FROM runs WHERE script = $1 AND started_at >= $2 AND started_at <= $3 ORDER BY started_at`,
 			script, since.UnixMilli(), until.UnixMilli())
 		if err != nil {
 			return err
@@ -111,10 +107,10 @@ func (s *Store) QueryRuns(ctx context.Context, script string, since, until time.
 // (nil, nil) if the script has no runs. Ties have no defined ordering.
 func (s *Store) LatestRun(ctx context.Context, script string) (*Run, error) {
 	var result *Run
-	err := s.withRetry(ctx, func() error {
+	err := s.withRetry(ctx, func(attemptCtx context.Context) error {
 		var err error
-		result, err = scanRun(s.db.QueryRowContext(ctx, `SELECT script, started_at, duration_ms, ok, error
-			FROM runs WHERE script = ? ORDER BY started_at DESC LIMIT 1`, script))
+		result, err = scanRun(s.db.QueryRowContext(attemptCtx, `SELECT script, started_at, duration_ms, ok, error
+			FROM runs WHERE script = $1 ORDER BY started_at DESC LIMIT 1`, script))
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -129,21 +125,19 @@ func (s *Store) LatestRun(ctx context.Context, script string) (*Run, error) {
 func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 	var r Run
 	var started int64
-	var ok int
-	if err := row.Scan(&r.Script, &started, &r.DurationMs, &ok, &r.Err); err != nil {
+	if err := row.Scan(&r.Script, &started, &r.DurationMs, &r.OK, &r.Err); err != nil {
 		return nil, err
 	}
 	r.StartedAt = time.UnixMilli(started)
-	r.OK = ok == 1
 	return &r, nil
 }
 
 // ListScripts returns the sorted, distinct union of scripts in requests and runs.
 func (s *Store) ListScripts(ctx context.Context) ([]string, error) {
 	var result []string
-	err := s.withRetry(ctx, func() (err error) {
+	err := s.withRetry(ctx, func(attemptCtx context.Context) (err error) {
 		result = nil
-		rows, err := s.db.QueryContext(ctx, `SELECT script FROM requests UNION SELECT script FROM runs ORDER BY script`)
+		rows, err := s.db.QueryContext(attemptCtx, `SELECT script FROM requests UNION SELECT script FROM runs ORDER BY script`)
 		if err != nil {
 			return err
 		}

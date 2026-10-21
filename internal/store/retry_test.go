@@ -6,131 +6,118 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"strings"
-	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/trriplejay/notinv/internal/storetest"
 )
 
-// This test uses the actual C-backed libsql remote client and a real loopback
-// HTTP server returning transport failures, not a substituted SQL driver.
-// HTTP is the driver's unencrypted loopback transport for the libSQL protocol;
-// production Open only accepts file: and libsql: URLs.
+// CLM-1: An integration test that terminates the store's backends with
+// pg_terminate_backend before InsertRun. The run row must still be written once,
+// and a CHECK-constraint failure must be attempted exactly once. The test goes
+// red when driver retry is not performed.
 func TestRemoteOperationsRetryDriverFailures(t *testing.T) {
-	operations := []struct {
-		name string
-		call func(context.Context, *Store) error
-	}{
-		{"insert requests", func(ctx context.Context, s *Store) error {
-			return s.InsertRequests(ctx, []Request{{Script: "script", Method: "GET"}})
-		}},
-		{"insert run", func(ctx context.Context, s *Store) error {
-			return s.InsertRun(ctx, Run{Script: "script"})
-		}},
-		{"query requests", func(ctx context.Context, s *Store) error {
-			_, err := s.QueryRequests(ctx, "script", time.UnixMilli(0), time.UnixMilli(1000))
-			return err
-		}},
-		{"query runs", func(ctx context.Context, s *Store) error {
-			_, err := s.QueryRuns(ctx, "script", time.UnixMilli(0), time.UnixMilli(1000))
-			return err
-		}},
-		{"latest run", func(ctx context.Context, s *Store) error {
-			_, err := s.LatestRun(ctx, "script")
-			return err
-		}},
-		{"list scripts", func(ctx context.Context, s *Store) error {
-			_, err := s.ListScripts(ctx)
-			return err
-		}},
-	}
-	for _, operation := range operations {
-		for _, tc := range []struct {
-			name     string
-			status   int
-			attempts int
-		}{
-			{"transient", http.StatusServiceUnavailable, 4},
-			{"permanent", http.StatusUnauthorized, 1},
-		} {
-			t.Run(operation.name+"/"+tc.name, func(t *testing.T) {
-				const token = "integration-secret"
-				var mu sync.Mutex
-				var arrivals []time.Time
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					mu.Lock()
-					arrivals = append(arrivals, time.Now())
-					mu.Unlock()
-					if !strings.Contains(r.Header.Get("Authorization"), token) {
-						t.Error("driver did not send the configured token")
-					}
-					// Echo a secret deliberately: driver error text must not escape.
-					http.Error(w, http.StatusText(tc.status)+" "+token, tc.status)
-				}))
-				t.Cleanup(server.Close)
-				db, err := sql.Open("libsql", server.URL+"?authToken="+url.QueryEscape(token))
-				if err != nil {
-					t.Fatal(err)
-				}
-				s := &Store{db: db, remote: true}
-				t.Cleanup(func() {
-					if err := s.Close(); err != nil {
-						t.Error(err)
-					}
-				})
-				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-				defer cancel()
-				err = operation.call(ctx, s)
-				if err == nil || strings.Contains(err.Error(), token) {
-					t.Fatalf("expected safe driver error, got %v", err)
-				}
-				mu.Lock()
-				times := append([]time.Time(nil), arrivals...)
-				mu.Unlock()
-				if len(times) != tc.attempts {
-					t.Fatalf("driver requests = %d, want %d; error = %v", len(times), tc.attempts, err)
-				}
-				// Lower bounds avoid scheduler-sensitive upper-bound assertions.
-				for i, minimum := range []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond} {
-					if i+1 < len(times) && times[i+1].Sub(times[i]) < minimum {
-						t.Errorf("retry %d did not back off for %v", i+1, minimum)
-					}
-				}
-			})
-		}
-	}
-}
+	dbURL := storetest.DatabaseURL(t)
+	s := openPostgresStore(t, dbURL)
+	ctx := t.Context()
 
-func TestLocalDoesNotRetryDriverFailure(t *testing.T) {
-	s, _ := openTestStore(t)
-	if s.remote {
-		t.Fatal("file store marked remote")
+	base := storetest.BaseURL(t)
+	admin, err := sql.Open("pgx", base)
+	if err != nil {
+		t.Fatalf("open admin connection: %v", err)
 	}
-	// Use a real SQLite failure whose message matches the transient heuristic.
-	if _, err := s.db.ExecContext(t.Context(), `CREATE TRIGGER fail_run BEFORE INSERT ON runs
-		BEGIN SELECT RAISE(ABORT, 'connection reset'); END`); err != nil {
-		t.Fatal(err)
-	}
-	attempts := 0
-	err := s.withRetry(t.Context(), func() error {
-		attempts++
-		_, err := s.db.ExecContext(t.Context(), `INSERT INTO runs (script, started_at, duration_ms, ok) VALUES (?, ?, ?, ?)`, "script", 0, 0, 0)
-		return err
+	t.Cleanup(func() { _ = admin.Close() })
+
+	t.Run("retry terminated backend", func(t *testing.T) {
+		// Warm up a connection in s.db so it has a backend pid.
+		var pid int
+		if err := s.db.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+			t.Fatalf("get backend pid: %v", err)
+		}
+
+		// Terminate that backend from admin connection.
+		if _, err := admin.ExecContext(ctx, `SELECT pg_terminate_backend($1)`, pid); err != nil {
+			t.Fatalf("terminate backend %d: %v", pid, err)
+		}
+
+		// Give Postgres a moment to terminate the process.
+		time.Sleep(50 * time.Millisecond)
+
+		var attempts int
+		onAttempt = func(attempt int) {
+			attempts++
+		}
+		defer func() { onAttempt = nil }()
+
+		// InsertRun must retry through transient termination and write the row once.
+		run := Run{
+			Script:     "retry_script",
+			StartedAt:  time.Now(),
+			DurationMs: 120,
+			OK:         true,
+		}
+		if err := s.InsertRun(ctx, run); err != nil {
+			t.Fatalf("InsertRun failed after backend termination: %v", err)
+		}
+
+		if attempts != 2 {
+			t.Errorf("attempts = %d, want 2", attempts)
+		}
+
+		var count int
+		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE script = $1`, "retry_script").Scan(&count); err != nil {
+			t.Fatalf("count runs: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("runs count = %d, want 1", count)
+		}
 	})
-	if err == nil || !isTransient(err) || attempts != 1 {
-		t.Fatalf("local attempts=%d, err=%v", attempts, err)
-	}
+
+	t.Run("check constraint attempted once", func(t *testing.T) {
+		// Add a CHECK constraint to runs table.
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE runs ADD CONSTRAINT test_check_duration CHECK (duration_ms >= 0)`); err != nil {
+			t.Fatalf("add check constraint: %v", err)
+		}
+		t.Cleanup(func() {
+			_, _ = s.db.ExecContext(context.Background(), `ALTER TABLE runs DROP CONSTRAINT IF EXISTS test_check_duration`)
+		})
+
+		var attempts int
+		onAttempt = func(attempt int) {
+			attempts++
+		}
+		defer func() { onAttempt = nil }()
+
+		run := Run{
+			Script:     "check_script",
+			StartedAt:  time.Now(),
+			DurationMs: -50,
+			OK:         false,
+		}
+		err := s.InsertRun(ctx, run)
+
+		if err == nil {
+			t.Fatal("InsertRun with invalid duration succeeded, want check constraint error")
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+			t.Errorf("expected 23514 check_violation, got %v", err)
+		}
+		// Attempted exactly once: asserted by count, not timing.
+		if attempts != 1 {
+			t.Errorf("check constraint failure attempts = %d, want exactly 1 without retry", attempts)
+		}
+	})
 }
 
 func TestRetryCancellationAndRecovery(t *testing.T) {
-	s := &Store{remote: true}
+	s := &Store{}
 	transient := errors.New("connection reset")
 	t.Run("recovery", func(t *testing.T) {
 		attempts := 0
-		err := s.withRetry(t.Context(), func() error {
+		err := s.withRetry(t.Context(), func(ctx context.Context) error {
 			attempts++
 			if attempts < 3 {
 				return transient
@@ -144,7 +131,7 @@ func TestRetryCancellationAndRecovery(t *testing.T) {
 	t.Run("last cause", func(t *testing.T) {
 		attempts := 0
 		last := errors.New("last connection reset")
-		err := s.withRetry(t.Context(), func() error {
+		err := s.withRetry(t.Context(), func(ctx context.Context) error {
 			attempts++
 			if attempts == 4 {
 				return last
@@ -159,7 +146,7 @@ func TestRetryCancellationAndRecovery(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		attempts := 0
-		err := s.withRetry(ctx, func() error {
+		err := s.withRetry(ctx, func(ctx context.Context) error {
 			attempts++
 			cancel()
 			return transient
@@ -172,7 +159,7 @@ func TestRetryCancellationAndRecovery(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		attempts := 0
-		err := s.withRetry(ctx, func() error {
+		err := s.withRetry(ctx, func(ctx context.Context) error {
 			attempts++
 			return nil
 		})
@@ -180,25 +167,71 @@ func TestRetryCancellationAndRecovery(t *testing.T) {
 			t.Fatalf("attempts=%d, err=%v", attempts, err)
 		}
 	})
+	t.Run("per-attempt deadline exceeded not retried", func(t *testing.T) {
+		orig := perCallTimeout
+		perCallTimeout = 20 * time.Millisecond
+		defer func() { perCallTimeout = orig }()
+
+		attempts := 0
+		err := s.withRetry(t.Context(), func(ctx context.Context) error {
+			attempts++
+			<-ctx.Done()
+			return ctx.Err()
+		})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected DeadlineExceeded, got %v", err)
+		}
+		if attempts != 1 {
+			t.Fatalf("attempts = %d, want 1", attempts)
+		}
+	})
 }
 
+// CLM-1: A table-driven unit test of isTransient:
+// pgconn.PgError class 08, 57P01, 40001 and 40P01, *pgconn.ConnectError, and
+// ECONNREFUSED/ECONNRESET are true;
+// 23505, 42601, 28P01, 3D000, context.Canceled and context.DeadlineExceeded are false.
 func TestTransientClassification(t *testing.T) {
 	for _, tc := range []struct {
+		name string
 		err  error
 		want bool
 	}{
-		{nil, false},
-		{errors.New("constraint failed"), false},
-		{errors.New("UNAVAILABLE"), true},
-		{errors.New("connection refused"), true},
-		{errors.New("connection reset"), true},
-		{errors.New("timeout"), true},
-		{fmt.Errorf("wrapped: %w", &net.DNSError{IsTimeout: true}), true},
-		{fmt.Errorf("timeout: %w", context.Canceled), false},
-		{context.DeadlineExceeded, false},
+		{"nil", nil, false},
+		{"generic constraint failed", errors.New("constraint failed"), false},
+		{"UNAVAILABLE", errors.New("UNAVAILABLE"), true},
+		{"connection refused string", errors.New("connection refused"), true},
+		{"connection reset string", errors.New("connection reset"), true},
+		{"timeout string", errors.New("timeout"), true},
+		{"net.DNSError timeout", fmt.Errorf("wrapped: %w", &net.DNSError{IsTimeout: true}), true},
+		{"timeout string with Canceled", fmt.Errorf("timeout: %w", context.Canceled), false},
+		{"context.Canceled", context.Canceled, false},
+		{"context.DeadlineExceeded", context.DeadlineExceeded, false},
+		// pgconn.PgError transient classes/codes
+		{"pgconn class 08000", &pgconn.PgError{Code: "08000"}, true},
+		{"pgconn class 08006", &pgconn.PgError{Code: "08006"}, true},
+		{"pgconn 57P01 admin shutdown", &pgconn.PgError{Code: "57P01"}, true},
+		{"pgconn 57P03 cannot_connect_now", &pgconn.PgError{Code: "57P03"}, true},
+		{"pgconn 40001 serialization failure", &pgconn.PgError{Code: "40001"}, true},
+		{"pgconn 40P01 deadlock detected", &pgconn.PgError{Code: "40P01"}, true},
+		// *pgconn.ConnectError
+		{"pgconn.ConnectError", &pgconn.ConnectError{}, true},
+		// ECONNREFUSED and ECONNRESET
+		{"ECONNREFUSED", syscall.ECONNREFUSED, true},
+		{"ECONNRESET", syscall.ECONNRESET, true},
+		{"wrapped ECONNREFUSED", fmt.Errorf("connect: %w", syscall.ECONNREFUSED), true},
+		{"wrapped ECONNRESET", fmt.Errorf("read: %w", syscall.ECONNRESET), true},
+		// Permanent errors
+		{"pgconn 23505 unique violation", &pgconn.PgError{Code: "23505"}, false},
+		{"pgconn 42601 syntax error", &pgconn.PgError{Code: "42601"}, false},
+		{"pgconn 28P01 invalid password", &pgconn.PgError{Code: "28P01"}, false},
+		{"pgconn 28000 invalid authorization", &pgconn.PgError{Code: "28000"}, false},
+		{"pgconn 3D000 invalid database", &pgconn.PgError{Code: "3D000"}, false},
 	} {
-		if got := isTransient(tc.err); got != tc.want {
-			t.Errorf("isTransient(%v)=%v, want %v", tc.err, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTransient(tc.err); got != tc.want {
+				t.Errorf("isTransient(%v)=%v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

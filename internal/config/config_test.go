@@ -20,7 +20,6 @@ func unsetConfigEnv(t *testing.T) {
 		"NOTINV_RETENTION_DAYS",
 		"NOTINV_LOG_LEVEL",
 		"NOTINV_LOG_FORMAT",
-		"DATABASE_AUTH_TOKEN",
 		"NOTINV_DISCORD_TOKEN",
 		"NOTINV_DISCORD_USER_ID",
 	} {
@@ -29,6 +28,7 @@ func unsetConfigEnv(t *testing.T) {
 			t.Fatalf("unset %s: %v", key, err)
 		}
 	}
+	t.Setenv("DATABASE_URL", "postgres://u:p@localhost:5432/notinv")
 }
 
 func assertConfig(t *testing.T, got, want Config) {
@@ -44,7 +44,6 @@ func assertConfig(t *testing.T, got, want Config) {
 		{"RetentionDays", got.RetentionDays, want.RetentionDays},
 		{"LogLevel", got.LogLevel, want.LogLevel},
 		{"LogFormat", got.LogFormat, want.LogFormat},
-		{"DatabaseAuthToken", got.DatabaseAuthToken, want.DatabaseAuthToken},
 		{"DiscordToken", got.DiscordToken, want.DiscordToken},
 		{"DiscordUserID", got.DiscordUserID, want.DiscordUserID},
 		{"DiscordDryRun", got.DiscordDryRun, want.DiscordDryRun},
@@ -60,14 +59,28 @@ func assertConfig(t *testing.T, got, want Config) {
 // CLM-10: every documented default applies when all nine variables are unset.
 func TestLoadDefaults(t *testing.T) {
 	unsetConfigEnv(t)
+	t.Setenv("DATABASE_URL", "")
+	if err := os.Unsetenv("DATABASE_URL"); err != nil {
+		t.Fatalf("unset DATABASE_URL: %v", err)
+	}
 	got, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "Postgres DATABASE_URL is required") {
+		t.Fatalf("Load with unset DATABASE_URL error = %v, want error containing %q", err, "Postgres DATABASE_URL is required")
+	}
+	if got != nil {
+		t.Fatalf("Load with unset DATABASE_URL returned non-nil config: %+v", got)
+	}
+
+	const postgresURL = "postgres://u:p@localhost:5432/notinv"
+	t.Setenv("DATABASE_URL", postgresURL)
+	got, err = Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	assertConfig(t, *got, Config{
 		Env:           "dev",
 		Listen:        ":8080",
-		DatabaseURL:   "file:./data/notinv.db",
+		DatabaseURL:   postgresURL,
 		RetentionDays: 30,
 		LogLevel:      "info",
 		LogFormat:     "text",
@@ -84,11 +97,10 @@ func TestLoadOverrides(t *testing.T) {
 	}{
 		{"NOTINV_ENV", "prod"},
 		{"NOTINV_LISTEN", "127.0.0.1:9090"},
-		{"DATABASE_URL", "libsql://example.test/db"},
+		{"DATABASE_URL", "postgres://example.test/db"},
 		{"NOTINV_RETENTION_DAYS", "7"},
 		{"NOTINV_LOG_LEVEL", "debug"},
 		{"NOTINV_LOG_FORMAT", "json"},
-		{"DATABASE_AUTH_TOKEN", "db-test-value"},
 		{"NOTINV_DISCORD_TOKEN", "discord-test-value"},
 		{"NOTINV_DISCORD_USER_ID", "123456789"},
 	} {
@@ -99,16 +111,15 @@ func TestLoadOverrides(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	assertConfig(t, *got, Config{
-		Env:               "prod",
-		Listen:            "127.0.0.1:9090",
-		DatabaseURL:       "libsql://example.test/db",
-		RetentionDays:     7,
-		LogLevel:          "debug",
-		LogFormat:         "json",
-		DatabaseAuthToken: "db-test-value",
-		DiscordToken:      "discord-test-value",
-		DiscordUserID:     "123456789",
-		DiscordDryRun:     false,
+		Env:           "prod",
+		Listen:        "127.0.0.1:9090",
+		DatabaseURL:   "postgres://example.test/db",
+		RetentionDays: 7,
+		LogLevel:      "debug",
+		LogFormat:     "json",
+		DiscordToken:  "discord-test-value",
+		DiscordUserID: "123456789",
+		DiscordDryRun: false,
 	})
 }
 
@@ -212,35 +223,46 @@ func TestLoadEnv(t *testing.T) {
 	}
 }
 
-// CLM-4 and libsql authentication: reject unsupported or malformed URLs and
-// require a separate auth token for libsql, even if the URL has userinfo.
+// Reject unsupported or malformed URLs.
 func TestLoadDatabaseURL(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		url     string
-		token   string
 		wantErr bool
 	}{
-		{"file", "file:./x.db", "", false},
-		{"libsql", "libsql://example.test/db", "test-auth", false},
-		{"postgres", "postgres://example.test/db", "test-auth", true},
-		{"https", "https://example.test/db", "test-auth", true},
-		{"missing scheme", "./x.db", "", true},
-		{"empty", "", "", true},
-		{"malformed", "libsql://user:secret@example.test/%zz", "test-auth", true},
-		{"libsql no auth", "libsql://example.test/db", "", true},
-		{"userinfo is not auth", "libsql://user:secret@example.test/db", "", true},
+		{"empty", "", true},
+		{"file", "file:./x.db", true},
+		{"libsql", "libsql://example.test/db", true},
+		{"https", "https://example.test/db", true},
+		{"missing scheme", "./x.db", true},
+		{"malformed", "postgres://user:secret@example.test/%zz", true},
+		{"postgres", "postgres://u:p@h:5432/db", false},
+		{"postgresql", "postgresql://u:p@h/db", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			unsetConfigEnv(t)
 			t.Setenv("DATABASE_URL", tt.url)
-			t.Setenv("DATABASE_AUTH_TOKEN", tt.token)
 			got, err := Load()
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("Load error = %v, want error %t", err, tt.wantErr)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if got != nil {
+					t.Fatalf("expected nil config on error, got %+v", got)
+				}
+				if !strings.Contains(err.Error(), "Postgres DATABASE_URL is required") {
+					t.Fatalf("error %q does not contain %q", err.Error(), "Postgres DATABASE_URL is required")
+				}
+				if tt.url != "" && strings.Contains(err.Error(), tt.url) {
+					t.Fatalf("error %q echoed the URL", err.Error())
+				}
+				return
 			}
-			if !tt.wantErr && (got == nil || got.DatabaseURL != tt.url) {
-				t.Fatal("Load did not preserve database URL")
+			if err != nil {
+				t.Fatalf("Load error = %v, want nil", err)
+			}
+			if got == nil || got.DatabaseURL != tt.url {
+				t.Fatalf("Load did not preserve database URL: got %+v", got)
 			}
 		})
 	}
@@ -298,7 +320,7 @@ func TestLoadDiscordCredentials(t *testing.T) {
 }
 
 func TestConfigLogValueFields(t *testing.T) {
-	for _, databaseURL := range []string{"file:./data/notinv.db", "libsql://example.test/db"} {
+	for _, databaseURL := range []string{"postgres://example.test/db", "postgresql://example.test:5432/notinv"} {
 		t.Run(databaseURL, func(t *testing.T) {
 			c := Config{
 				Env:           "prod",
@@ -318,33 +340,39 @@ func TestConfigLogValueFields(t *testing.T) {
 			for _, attr := range value.Group() {
 				got[attr.Key] = attr.Value.Any()
 			}
-			for key, want := range map[string]any{
-				"env":                 "prod",
-				"listen":              ":9090",
-				"database_url":        databaseURL,
-				"retention_days":      int64(42),
-				"log_level":           "warn",
-				"log_format":          "json",
-				"database_auth_token": "[REDACTED]",
-				"discord_token":       "[REDACTED]",
-				"discord_user_id":     "123456789",
-				"discord_dry_run":     true,
-			} {
-				if got[key] != want {
-					t.Errorf("unexpected log field %s", key)
+			expected := map[string]any{
+				"env":             "prod",
+				"listen":          ":9090",
+				"database_url":    databaseURL,
+				"retention_days":  int64(42),
+				"log_level":       "warn",
+				"log_format":      "json",
+				"discord_token":   "[REDACTED]",
+				"discord_user_id": "123456789",
+				"discord_dry_run": true,
+			}
+			if len(got) != len(expected) {
+				t.Fatalf("LogValue returned %d attributes, want %d: got keys %v", len(got), len(expected), got)
+			}
+			for key, want := range expected {
+				if gotVal, ok := got[key]; !ok {
+					t.Errorf("missing log field %s", key)
+				} else if gotVal != want {
+					t.Errorf("log field %s = %v, want %v", key, gotVal, want)
 				}
 			}
 		})
 	}
 }
 
-// CLM-8: exercise String, standard formatting, and actual slog handlers with
-// userinfo in password, username-only, escaped, opaque, and malformed URLs.
+// CLM-8 / CLM-7: exercise String, standard formatting, and actual slog handlers with
+// userinfo in password, username-only, escaped, opaque, and malformed URLs,
+// as well as password-bearing query parameters (any case).
 func TestConfigRedaction(t *testing.T) {
 	const discordSecret = "SENTINEL_DISCORD_SECRET"
-	const authSecret = "SENTINEL_DB_AUTH_SECRET"   //nolint:gosec // G101 false positive: test sentinel, not a real credential
 	const userSecret = "SENTINEL_URL_USER"         //nolint:gosec // G101 false positive: test sentinel, not a real credential
 	const passwordSecret = "SENTINEL_URL_PASSWORD" //nolint:gosec // G101 false positive: test sentinel, not a real credential
+	const sentinelPw = "S3cr3tPw"                  //nolint:gosec // G101 false positive: test sentinel, not a real credential
 	for _, tt := range []struct {
 		name string
 		url  string
@@ -354,12 +382,16 @@ func TestConfigRedaction(t *testing.T) {
 		{"escaped", "libsql://%53ENTINEL_URL_USER:%53ENTINEL_URL_PASSWORD@example.test/db"},
 		{"malformed", "libsql://" + userSecret + ":" + passwordSecret + "@example.test/%zz"},
 		{"opaque", "libsql:" + userSecret + ":" + passwordSecret + "@example.test/db"},
+		{"userinfo with sentinel", "postgres://app:" + sentinelPw + "@example.test/db"},
+		{"query param password lowercase", "postgres://example.test/db?sslmode=disable&password=" + sentinelPw},
+		{"query param password uppercase", "postgres://example.test/db?PASSWORD=" + sentinelPw},
+		{"query param password mixed case", "postgres://example.test/db?db_PassWord_val=" + sentinelPw},
+		{"both userinfo and query param password", "postgres://app:" + sentinelPw + "@example.test/db?secret_password=" + sentinelPw},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := Config{
-				DatabaseURL:       tt.url,
-				DatabaseAuthToken: authSecret,
-				DiscordToken:      discordSecret,
+				DatabaseURL:  tt.url,
+				DiscordToken: discordSecret,
 			}
 			var jsonLog, textLog bytes.Buffer
 			slog.New(slog.NewJSONHandler(&jsonLog, nil)).Info("config", "config", c)
@@ -377,20 +409,18 @@ func TestConfigRedaction(t *testing.T) {
 				{"slog text", textLog.String()},
 			} {
 				t.Run(form.name, func(t *testing.T) {
-					if !strings.Contains(form.output, "[REDACTED]") {
-						t.Error("missing redaction marker")
-					}
 					for _, secret := range []string{
-						discordSecret, authSecret, userSecret, passwordSecret,
+						discordSecret, userSecret, passwordSecret,
 						"%53ENTINEL_URL_USER", "%53ENTINEL_URL_PASSWORD",
+						sentinelPw,
 					} {
 						if strings.Contains(form.output, secret) {
-							t.Error("secret leaked in config representation")
+							t.Errorf("secret %q leaked in config representation: %s", secret, form.output)
 						}
 					}
 				})
 			}
-			if c.DatabaseURL != tt.url || c.DatabaseAuthToken != authSecret || c.DiscordToken != discordSecret {
+			if c.DatabaseURL != tt.url || c.DiscordToken != discordSecret {
 				t.Fatal("rendering mutated credentials")
 			}
 		})
