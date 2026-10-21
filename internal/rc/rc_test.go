@@ -518,10 +518,12 @@ func TestShutdownFlushAfterCancellation(t *testing.T) {
 
 func TestWriterDefaultsAndInsertFailure(t *testing.T) {
 	s, db := openTestStore(t)
-	if _, err := db.ExecContext(t.Context(), `CREATE TRIGGER reject_request BEFORE INSERT ON requests
-		BEGIN SELECT RAISE(ABORT, 'rejected'); END`); err != nil {
+	if _, err := db.ExecContext(t.Context(), `ALTER TABLE requests ADD CONSTRAINT test_check_script CHECK (script <> 'failed')`); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `ALTER TABLE requests DROP CONSTRAINT IF EXISTS test_check_script`)
+	})
 	var logs bytes.Buffer
 	w := NewWriter(s, "", slog.New(slog.NewTextHandler(&logs, nil)), Options{})
 	if cap(w.records) != 1024 || w.batchSize != 100 || w.interval != 5*time.Second || w.userAgent != "notinv/dev" {

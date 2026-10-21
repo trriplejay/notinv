@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/trriplejay/notinv/internal/storetest"
 )
 
@@ -351,13 +352,19 @@ func TestMigrationIdempotency(t *testing.T) {
 func TestBatchRollback(t *testing.T) {
 	s, _ := openTestStore(t)
 	ctx := t.Context()
-	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER reject_request BEFORE INSERT ON requests
-		WHEN NEW.method = 'FAIL' BEGIN SELECT RAISE(ABORT, 'rejected'); END`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE requests ADD CONSTRAINT test_check_method CHECK (method <> 'FAIL')`); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_, _ = s.db.ExecContext(context.Background(), `ALTER TABLE requests DROP CONSTRAINT IF EXISTS test_check_method`)
+	})
 	err := s.InsertRequests(ctx, []Request{{Script: "batch", Method: "GET"}, {Script: "batch", Method: "FAIL"}})
 	if err == nil {
 		t.Fatal("expected second insert to fail")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Fatalf("expected 23514 check_violation, got %v", err)
 	}
 	var count int
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM requests`).Scan(&count); err != nil {
