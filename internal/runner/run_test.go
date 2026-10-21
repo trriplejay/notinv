@@ -761,11 +761,59 @@ func TestRunSkipsWhenDisabledAndScriptEnabledFails(t *testing.T) {
 	})
 }
 
-// TestRunSkipsWhenScriptEnabledFails asserts that when the enabled-state read fails
-// with no prior state (e.g. at startup), the runner fails OPEN: it logs a warning,
-// runs the script, and records the run in the store.
-func TestRunSkipsWhenScriptEnabledFails(t *testing.T) {
-	TestRunFailsOpenWhenScriptEnabledFails(t)
+// Governor ruling: remember last known state on read error.
+// If the script was last read as enabled and a subsequent read fails, it keeps
+// running at its scheduled ticks (last-known state) and logs a warning per failure.
+func TestRunKeepsRunningWhenEnabledAndScriptEnabledFails(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var buf bytes.Buffer
+		rc := &Context{Log: slog.New(slog.NewTextHandler(&buf, nil))}
+		runs := newFakeStore()
+
+		var calls atomic.Int32
+		script := fakeScript{name: "enabled-then-fail", schedule: "@every 1s", run: func(context.Context, *Context) error {
+			calls.Add(1)
+			return nil
+		}}
+
+		// Stored state is enabled: the startup read succeeds and the script runs.
+		runs.setEnabled("enabled-then-fail", true)
+
+		stop := startTestRunner(t, script, rc, runs)
+		defer stop()
+
+		synctest.Wait()
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("startup: calls = %d, want 1", n)
+		}
+		if strings.Contains(buf.String(), "level=WARN") {
+			t.Fatalf("unexpected warn before any read failure: %s", buf.String())
+		}
+
+		// Later reads fail: the runner keeps the last-known enabled state and runs.
+		runs.setStateErr("enabled-then-fail", errors.New("state db unavailable"))
+		for i := 0; i < 2; i++ {
+			time.Sleep(time.Second)
+			synctest.Wait()
+		}
+
+		if n := calls.Load(); n != 3 {
+			t.Fatalf("script ran %d times after read failed when previously enabled, want 3", n)
+		}
+		recorded := runs.snapshot()
+		if len(recorded) != 3 {
+			t.Fatalf("recorded runs = %+v, want 3", recorded)
+		}
+		for i, r := range recorded {
+			if r.Script != "enabled-then-fail" || !r.OK {
+				t.Errorf("run %d = %+v, want script=enabled-then-fail ok=true", i, r)
+			}
+		}
+		warn := `level=WARN msg="check script enabled failed" script=enabled-then-fail error="state db unavailable"`
+		if got := strings.Count(buf.String(), warn); got != 2 {
+			t.Errorf("warn log count = %d, want 2 (one per failed read): %s", got, buf.String())
+		}
+	})
 }
 
 // When no prior read has succeeded (e.g. startup read fails), runner fails open.
@@ -826,10 +874,64 @@ func TestRunFailsOpenWhenScriptEnabledFails(t *testing.T) {
 	})
 }
 
-// TestRunClearingErrorResumesRunning asserts that after transient read errors,
-// clearing the error resumes normal execution.
+// Governor ruling: once a read error clears, the runner follows the stored state
+// again rather than the last-known state: an enabled script keeps running, and a
+// script disabled while the error was active is skipped on the next read.
 func TestRunClearingErrorResumesRunning(t *testing.T) {
-	TestRunFailsOpenWhenScriptEnabledFails(t)
+	synctest.Test(t, func(t *testing.T) {
+		var buf bytes.Buffer
+		rc := &Context{Log: slog.New(slog.NewTextHandler(&buf, nil))}
+		runs := newFakeStore()
+
+		var calls atomic.Int32
+		script := fakeScript{name: "clear-error", schedule: "@every 1s", run: func(context.Context, *Context) error {
+			calls.Add(1)
+			return nil
+		}}
+
+		runs.setEnabled("clear-error", true)
+		stop := startTestRunner(t, script, rc, runs)
+		defer stop()
+
+		// Startup: enabled, runs.
+		synctest.Wait()
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("startup: calls = %d, want 1", n)
+		}
+
+		// Tick 1: read fails, last-known enabled, runs.
+		runs.setStateErr("clear-error", errors.New("transient"))
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if n := calls.Load(); n != 2 {
+			t.Fatalf("tick 1 (read failing): calls = %d, want 2", n)
+		}
+
+		// Tick 2: error cleared, stored state still enabled, runs.
+		runs.clearStateErr("clear-error")
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if n := calls.Load(); n != 3 {
+			t.Fatalf("tick 2 (error cleared, enabled): calls = %d, want 3", n)
+		}
+
+		// Tick 3: stored state now disabled, the cleared read is followed, skipped.
+		runs.setEnabled("clear-error", false)
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if n := calls.Load(); n != 3 {
+			t.Fatalf("tick 3 (error cleared, disabled): calls = %d, want 3", n)
+		}
+
+		recorded := runs.snapshot()
+		if len(recorded) != 3 {
+			t.Fatalf("recorded runs = %+v, want 3", recorded)
+		}
+		warn := `level=WARN msg="check script enabled failed" script=clear-error error=transient`
+		if got := strings.Count(buf.String(), warn); got != 1 {
+			t.Errorf("warn log count = %d, want 1: %s", got, buf.String())
+		}
+	})
 }
 
 // Governor ruling / fk_0ffa8916e7be: recovery path after read error.
