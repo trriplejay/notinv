@@ -2,24 +2,36 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
 	"time"
 
-	// Register the same driver for local files and remote libSQL databases.
-	_ "github.com/tursodatabase/go-libsql"
+	// Register the pgx database/sql driver ("pgx") for postgres:// URLs.
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// Store persists check results in a local or remote libSQL database.
+// RandomKey returns a cryptographically random 16-byte hex record key.
+func RandomKey() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("crypto/rand: " + err.Error())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// Store persists check results in a Postgres database.
 type Store struct {
 	db     *sql.DB
-	remote bool
+	scheme string
 }
 
 // Request records the result of one HTTP request. Err is nil on success.
 type Request struct {
+	Key        string
 	Script     string
 	Method     string
 	URL        string
@@ -31,6 +43,7 @@ type Request struct {
 
 // Run records the result of one script execution. Err may be nil.
 type Run struct {
+	Key        string
 	Script     string
 	StartedAt  time.Time
 	DurationMs int64
@@ -38,54 +51,105 @@ type Run struct {
 	Err        *string
 }
 
+var (
+	openWaitBudget     = 60 * time.Second
+	openInitialBackoff = 50 * time.Millisecond
+	openMaxBackoff     = time.Second
+	openPingTimeout    = 3 * time.Second
+	// openMigrateTimeout bounds migrate inside Open, including the wait for
+	// the migration advisory lock, so a database that accepts the connection
+	// but stalls cannot hang startup.
+	openMigrateTimeout = 30 * time.Second
+)
+
 // Open opens and checks the database, then applies any outstanding migrations.
-// Both file: and libsql: URLs use the libsql driver. Credentials are never
+// postgres: and postgresql: URLs use the pgx driver. Credentials are never
 // printed in returned errors; the original cause remains available via Unwrap.
-func Open(ctx context.Context, databaseURL, authToken string) (*Store, error) {
-	dsn, scheme, err := databaseDSN(databaseURL, authToken)
+func Open(ctx context.Context, databaseURL string) (*Store, error) {
+	dsn, scheme, err := databaseDSN(databaseURL)
 	if err != nil {
 		return nil, databaseError("open", scheme, err)
 	}
-	db, err := sql.Open("libsql", dsn)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		if db != nil {
 			err = errors.Join(err, db.Close())
 		}
 		return nil, databaseError("open", scheme, err)
 	}
-	s := &Store{db: db, remote: scheme == "libsql"}
-	if !s.remote {
-		// SQLite allows one writer at a time, and the driver does not wait on a
-		// held lock, so concurrent writers (script runs and the retention
-		// sweep) fail with "database is locked". A single connection serializes
-		// access in-process instead. No store method nests queries, so this
-		// cannot deadlock.
-		db.SetMaxOpenConns(1)
+	s := &Store{db: db, scheme: scheme}
+
+	start := time.Now()
+	delay := openInitialBackoff
+	for {
+		if err := ctx.Err(); err != nil {
+			_ = db.Close()
+			return nil, databaseError("ping", scheme, err)
+		}
+
+		pingCtx, pingCancel := context.WithTimeout(ctx, openPingTimeout)
+		err := db.PingContext(pingCtx)
+		attemptTimedOut := errors.Is(pingCtx.Err(), context.DeadlineExceeded)
+		pingCancel()
+		if err == nil {
+			break
+		}
+
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			_ = db.Close()
+			return nil, databaseError("ping", scheme, context.Canceled)
+		}
+
+		// A ping attempt that hit its own deadline while the caller's context
+		// is still live means the server accepted the connection but did not
+		// answer: keep waiting within the budget. This applies to Open's wait
+		// only; ordinary Store calls still treat a deadline as final.
+		stalled := ctx.Err() == nil && (attemptTimedOut || errors.Is(err, context.DeadlineExceeded))
+
+		// Permanent failure or non-transient error: fail immediately on first attempt.
+		if !stalled && !isTransient(err) {
+			_ = db.Close()
+			return nil, databaseError("ping", scheme, err)
+		}
+
+		// Check if wait budget expired
+		if time.Since(start) >= openWaitBudget {
+			_ = db.Close()
+			return nil, fmt.Errorf("database could not be reached within the wait (%v): %w", openWaitBudget, databaseError("ping", scheme, err))
+		}
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			_ = db.Close()
+			return nil, databaseError("ping", scheme, ctx.Err())
+		case <-timer.C:
+		}
+		delay = min(delay*2, openMaxBackoff)
 	}
-	if err := db.PingContext(ctx); err != nil {
-		return nil, databaseError("ping", scheme, errors.Join(err, db.Close()))
+
+	migrateCtx, migrateCancel := context.WithTimeout(ctx, openMigrateTimeout)
+	err = s.migrate(migrateCtx)
+	if err != nil && errors.Is(migrateCtx.Err(), context.DeadlineExceeded) && !errors.Is(err, context.DeadlineExceeded) {
+		err = fmt.Errorf("%w: %w", context.DeadlineExceeded, err)
 	}
-	if err := s.migrate(ctx); err != nil {
+	migrateCancel()
+	if err != nil {
 		return nil, databaseError("migrate", scheme, errors.Join(err, db.Close()))
 	}
 	return s, nil
 }
 
-func databaseDSN(databaseURL, authToken string) (string, string, error) {
+func databaseDSN(databaseURL string) (string, string, error) {
 	u, err := url.Parse(databaseURL)
 	if err != nil {
 		return "", "unknown", err
 	}
 	switch u.Scheme {
-	case "file":
-		return databaseURL, u.Scheme, nil
-	case "libsql":
-		if authToken != "" {
-			q := u.Query()
-			q.Set("authToken", authToken)
-			u.RawQuery = q.Encode()
-		}
-		return u.String(), u.Scheme, nil
+	case "postgres", "postgresql":
+		// Postgres carries credentials in the URL itself.
+		return databaseURL, "postgres", nil
 	default:
 		return "", "unknown", errors.New("unsupported database scheme")
 	}
@@ -124,31 +188,37 @@ func databaseError(operation, scheme string, err error) error {
 }
 
 func (s *Store) wrap(operation string, err error) error {
-	scheme := "file"
-	if s.remote {
-		scheme = "libsql"
+	scheme := s.scheme
+	if scheme == "" {
+		scheme = "postgres"
 	}
 	return databaseError(operation, scheme, err)
 }
 
 // InsertRequests inserts the entire batch in one transaction. An empty batch
-// is a no-op. Remote retries replay the batch; an ambiguous commit response can
-// therefore duplicate records (the schema does not contain idempotency keys).
+// is a no-op. Each record has its key filled if empty before withRetry, and
+// rows are inserted with ON CONFLICT (key) DO NOTHING.
 func (s *Store) InsertRequests(ctx context.Context, reqs []Request) error {
 	if len(reqs) == 0 {
 		return nil
 	}
-	err := s.withRetry(ctx, func() error {
+	for i := range reqs {
+		if reqs[i].Key == "" {
+			reqs[i].Key = RandomKey()
+		}
+	}
+	err := s.withRetry(ctx, func(ctx context.Context) error {
 		return inTransaction(ctx, s.db, func(tx *sql.Tx) (err error) {
 			stmt, err := tx.PrepareContext(ctx, `INSERT INTO requests
-				(script, method, url, started_at, duration_ms, status_code, error)
-				VALUES (?, ?, ?, ?, ?, ?, ?)`)
+				(key, script, method, url, started_at, duration_ms, status_code, error)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				ON CONFLICT (key) DO NOTHING`)
 			if err != nil {
 				return err
 			}
 			defer func() { err = errors.Join(err, stmt.Close()) }()
 			for _, r := range reqs {
-				if _, err := stmt.ExecContext(ctx, r.Script, r.Method, r.URL,
+				if _, err := stmt.ExecContext(ctx, r.Key, r.Script, r.Method, r.URL,
 					r.StartedAt.UnixMilli(), r.DurationMs, r.StatusCode, r.Err); err != nil {
 					return err
 				}
@@ -159,17 +229,18 @@ func (s *Store) InsertRequests(ctx context.Context, reqs []Request) error {
 	return s.wrap("insert requests", err)
 }
 
-// InsertRun inserts one run, storing OK as 0 or 1 and StartedAt as Unix millis.
-// A remote retry after an ambiguous response can duplicate the record.
+// InsertRun inserts one run, storing OK as a boolean and StartedAt as 64-bit
+// Unix millis. An empty key is filled before withRetry, and rows are inserted
+// with ON CONFLICT (key) DO NOTHING.
 func (s *Store) InsertRun(ctx context.Context, run Run) error {
-	ok := 0
-	if run.OK {
-		ok = 1
+	if run.Key == "" {
+		run.Key = RandomKey()
 	}
-	err := s.withRetry(ctx, func() error {
+	err := s.withRetry(ctx, func(ctx context.Context) error {
 		_, err := s.db.ExecContext(ctx, `INSERT INTO runs
-			(script, started_at, duration_ms, ok, error) VALUES (?, ?, ?, ?, ?)`,
-			run.Script, run.StartedAt.UnixMilli(), run.DurationMs, ok, run.Err)
+			(key, script, started_at, duration_ms, ok, error) VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (key) DO NOTHING`,
+			run.Key, run.Script, run.StartedAt.UnixMilli(), run.DurationMs, run.OK, run.Err)
 		return err
 	})
 	return s.wrap("insert run", err)
@@ -179,9 +250,9 @@ func (s *Store) InsertRun(ctx context.Context, run Run) error {
 // state is enabled.
 func (s *Store) ScriptEnabled(ctx context.Context, script string) (bool, error) {
 	enabled := true
-	err := s.withRetry(ctx, func() error {
-		var v int
-		err := s.db.QueryRowContext(ctx, `SELECT enabled FROM script_state WHERE script = ?`, script).Scan(&v)
+	err := s.withRetry(ctx, func(ctx context.Context) error {
+		var v bool
+		err := s.db.QueryRowContext(ctx, `SELECT enabled FROM script_state WHERE script = $1`, script).Scan(&v)
 		if errors.Is(err, sql.ErrNoRows) {
 			enabled = true
 			return nil
@@ -189,7 +260,7 @@ func (s *Store) ScriptEnabled(ctx context.Context, script string) (bool, error) 
 		if err != nil {
 			return err
 		}
-		enabled = v != 0
+		enabled = v
 		return nil
 	})
 	return enabled, s.wrap("read script state", err)
@@ -198,13 +269,9 @@ func (s *Store) ScriptEnabled(ctx context.Context, script string) (bool, error) 
 // SetScriptEnabled stores whether the script may run. It touches only the
 // script_state table; recorded runs and requests are unchanged.
 func (s *Store) SetScriptEnabled(ctx context.Context, script string, enabled bool) error {
-	v := 0
-	if enabled {
-		v = 1
-	}
-	err := s.withRetry(ctx, func() error {
-		_, err := s.db.ExecContext(ctx, `INSERT INTO script_state (script, enabled) VALUES (?, ?)
-			ON CONFLICT(script) DO UPDATE SET enabled = excluded.enabled`, script, v)
+	err := s.withRetry(ctx, func(ctx context.Context) error {
+		_, err := s.db.ExecContext(ctx, `INSERT INTO script_state (script, enabled) VALUES ($1, $2)
+			ON CONFLICT (script) DO UPDATE SET enabled = EXCLUDED.enabled`, script, enabled)
 		return err
 	})
 	return s.wrap("set script state", err)

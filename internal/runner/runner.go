@@ -140,6 +140,7 @@ func Run(ctx context.Context, script Script, rc *Context, store RunStore) error 
 			slog.String("error", errStr))
 
 		run := storepkg.Run{
+			Key:        storepkg.RandomKey(),
 			Script:     script.Name(),
 			StartedAt:  start,
 			DurationMs: dur.Milliseconds(),

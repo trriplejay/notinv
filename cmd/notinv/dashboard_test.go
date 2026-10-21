@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,12 +16,13 @@ import (
 
 	"github.com/trriplejay/notinv/internal/runner"
 	"github.com/trriplejay/notinv/internal/store"
+	"github.com/trriplejay/notinv/internal/storetest"
 )
 
 func TestDashboardEmbeddedAndAPIRoutes(t *testing.T) {
 	// Neither the dashboard nor its dependencies may depend on the working directory.
 	t.Chdir(t.TempDir())
-	st, err := store.Open(context.Background(), "file:test.db", "")
+	st, err := store.Open(context.Background(), storetest.DatabaseURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestDashboardEmbeddedAndAPIRoutes(t *testing.T) {
 
 func TestDashboardScriptsSchedule(t *testing.T) {
 	t.Chdir(t.TempDir())
-	st, err := store.Open(context.Background(), "file:test.db", "")
+	st, err := store.Open(context.Background(), storetest.DatabaseURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,10 +110,10 @@ func (s countingScript) Run(ctx context.Context, _ *runner.Context) error {
 // restart and cron ticks, and historical runs remain queryable.
 func TestDashboardScriptDisableAndRestart(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		dbPath := filepath.Join(t.TempDir(), "integration.db")
+		dsn := storetest.DatabaseURL(t)
 		ctx := t.Context()
 
-		st, err := store.Open(ctx, "file:"+dbPath, "")
+		st, err := store.Open(ctx, dsn)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -189,7 +189,7 @@ func TestDashboardScriptDisableAndRestart(t *testing.T) {
 		}
 		st = nil
 
-		stRestart, err := store.Open(ctx, "file:"+dbPath, "")
+		stRestart, err := store.Open(ctx, dsn)
 		if err != nil {
 			t.Fatalf("store.Open restart: %v", err)
 		}
@@ -248,7 +248,7 @@ func TestDashboardScriptDisableAndRestart(t *testing.T) {
 // CLM-6 & CLM-7: newMux registers POST /api/scripts/{name}/enabled bare, with no auth wrapper.
 // Requests succeed with no credentials, cookies, or auth headers.
 func TestNewMuxScriptEnabledRoute(t *testing.T) {
-	st, err := store.Open(t.Context(), "file:"+filepath.Join(t.TempDir(), "test.db"), "")
+	st, err := store.Open(t.Context(), storetest.DatabaseURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

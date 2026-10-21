@@ -177,6 +177,9 @@ func TestRunRecordsRuns(t *testing.T) {
 		recorded := runs.waitForRuns(t, 2)
 		stop()
 		for _, run := range recorded {
+			if run.Key == "" {
+				t.Error("run record has empty key")
+			}
 			if run.Script != script.name || !run.OK || run.Err != nil || run.DurationMs != 25 {
 				t.Errorf("unexpected run: %+v", run)
 			}

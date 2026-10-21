@@ -3,7 +3,7 @@ root = "."
 tmp_dir = "/tmp/air"
 
 [build]
-  cmd = "CGO_ENABLED=1 go build -o /tmp/air/notinv ./cmd/notinv"
+  cmd = "CGO_ENABLED=0 go build -o /tmp/air/notinv ./cmd/notinv"
   bin = "/tmp/air/notinv"
   include_ext = ["go", "html", "css", "js"]
   exclude_dir = [".git", "assets", "bin", "data", "web/tests"]
