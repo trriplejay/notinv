@@ -56,6 +56,10 @@ var (
 	openInitialBackoff = 50 * time.Millisecond
 	openMaxBackoff     = time.Second
 	openPingTimeout    = 3 * time.Second
+	// openMigrateTimeout bounds migrate inside Open, including the wait for
+	// the migration advisory lock, so a database that accepts the connection
+	// but stalls cannot hang startup.
+	openMigrateTimeout = 30 * time.Second
 )
 
 // Open opens and checks the database, then applies any outstanding migrations.
@@ -85,6 +89,7 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 
 		pingCtx, pingCancel := context.WithTimeout(ctx, openPingTimeout)
 		err := db.PingContext(pingCtx)
+		attemptTimedOut := errors.Is(pingCtx.Err(), context.DeadlineExceeded)
 		pingCancel()
 		if err == nil {
 			break
@@ -95,8 +100,14 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 			return nil, databaseError("ping", scheme, context.Canceled)
 		}
 
+		// A ping attempt that hit its own deadline while the caller's context
+		// is still live means the server accepted the connection but did not
+		// answer: keep waiting within the budget. This applies to Open's wait
+		// only; ordinary Store calls still treat a deadline as final.
+		stalled := ctx.Err() == nil && (attemptTimedOut || errors.Is(err, context.DeadlineExceeded))
+
 		// Permanent failure or non-transient error: fail immediately on first attempt.
-		if !isTransient(err) {
+		if !stalled && !isTransient(err) {
 			_ = db.Close()
 			return nil, databaseError("ping", scheme, err)
 		}
@@ -118,7 +129,13 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		delay = min(delay*2, openMaxBackoff)
 	}
 
-	if err := s.migrate(ctx); err != nil {
+	migrateCtx, migrateCancel := context.WithTimeout(ctx, openMigrateTimeout)
+	err = s.migrate(migrateCtx)
+	if err != nil && errors.Is(migrateCtx.Err(), context.DeadlineExceeded) && !errors.Is(err, context.DeadlineExceeded) {
+		err = fmt.Errorf("%w: %w", context.DeadlineExceeded, err)
+	}
+	migrateCancel()
+	if err != nil {
 		return nil, databaseError("migrate", scheme, errors.Join(err, db.Close()))
 	}
 	return s, nil

@@ -92,34 +92,48 @@ func TestPostgresSchema(t *testing.T) {
 		}
 	}
 
-	for _, idx := range []struct{ name, table, cols string }{
-		{"idx_requests_script_started", "requests", "(script, started_at)"},
-		{"idx_runs_script_started", "runs", "(script, started_at)"},
-		{"idx_requests_key", "requests", "(key)"},
-		{"idx_runs_key", "runs", "(key)"},
+	for _, idx := range []struct {
+		name, table string
+		cols        []string
+		unique      bool
+	}{
+		{"idx_requests_script_started", "requests", []string{"script", "started_at"}, false},
+		{"idx_runs_script_started", "runs", []string{"script", "started_at"}, false},
+		{"idx_requests_key", "requests", []string{"key"}, true},
+		{"idx_runs_key", "runs", []string{"key"}, true},
 	} {
-		var def string
-		err := s.db.QueryRowContext(ctx, `SELECT indexdef FROM pg_indexes
-			WHERE schemaname = current_schema() AND indexname = $1`, idx.name).Scan(&def)
+		// pg_indexes scoped by schemaname and indexname; the definition text is
+		// not matched, because pg_get_indexdef drops the schema qualifier when
+		// the schema is on search_path.
+		var table string
+		err := s.db.QueryRowContext(ctx, `SELECT tablename FROM pg_indexes
+			WHERE schemaname = current_schema() AND indexname = $1`, idx.name).Scan(&table)
 		if err != nil {
 			t.Fatalf("index %s: %v", idx.name, err)
 		}
-		if !strings.Contains(def, "ON "+currentSchema(t, s)+"."+idx.table) || !strings.Contains(def, idx.cols) {
-			t.Errorf("index %s definition = %q, want on %s %s", idx.name, def, idx.table, idx.cols)
+		if table != idx.table {
+			t.Errorf("index %s is on table %q, want %q", idx.name, table, idx.table)
 		}
-		if strings.Contains(idx.name, "_key") && !strings.Contains(def, "UNIQUE") {
-			t.Errorf("index %s is not UNIQUE: %q", idx.name, def)
-		}
-	}
-}
 
-func currentSchema(t *testing.T, s *Store) string {
-	t.Helper()
-	var schema string
-	if err := s.db.QueryRowContext(t.Context(), `SELECT current_schema()`).Scan(&schema); err != nil {
-		t.Fatal(err)
+		var cols string
+		var unique bool
+		err = s.db.QueryRowContext(ctx, `SELECT string_agg(a.attname, ',' ORDER BY k.ord), bool_and(i.indisunique)
+			FROM pg_index i
+			JOIN pg_class c ON c.oid = i.indexrelid
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+			JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+			WHERE n.nspname = current_schema() AND c.relname = $1`, idx.name).Scan(&cols, &unique)
+		if err != nil {
+			t.Fatalf("index %s columns: %v", idx.name, err)
+		}
+		if want := strings.Join(idx.cols, ","); cols != want {
+			t.Errorf("index %s columns = %q, want %q", idx.name, cols, want)
+		}
+		if unique != idx.unique {
+			t.Errorf("index %s unique = %v, want %v", idx.name, unique, idx.unique)
+		}
 	}
-	return schema
 }
 
 // CLM-2: TestPostgresRunOkRefusesNonBoolean asserts Postgres rejects literal non-boolean ok values.

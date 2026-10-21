@@ -19,6 +19,9 @@ type Options struct {
 }
 
 // FlushTimeout bounds the final flush on Close when persisting buffered records.
+// A mid-run flush still in progress when Close is called is cancelled at once
+// and its batch is carried into that final flush, so Close returns within about
+// FlushTimeout even when the database stalls.
 const FlushTimeout = 2 * time.Second
 
 // FinalFlushTimeout is an alias for FlushTimeout.
@@ -130,8 +133,10 @@ func (w *Writer) enqueue(record store.Request) {
 }
 
 // Close stops accepting records, drains the buffer, and waits for persistence
-// to finish. It is safe to call concurrently or repeatedly. Insert failures are
-// logged and their batches discarded; Close does not retry failed batches.
+// to finish, within about FlushTimeout. It is safe to call concurrently or
+// repeatedly. A mid-run flush in progress is cancelled and its batch joins the
+// final flush. Insert failures are logged with the number of records dropped;
+// Close does not retry failed batches.
 func (w *Writer) Close() {
 	w.mu.Lock()
 	if !w.closed {
@@ -147,14 +152,33 @@ func (w *Writer) run() {
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	batch := make([]store.Request, 0, w.batchSize)
+	// stopCtx is cancelled as soon as Close signals stop, so a mid-run flush
+	// stalled on the database never holds Close past its bounded final flush.
+	// It is independent of any application context.
+	stopCtx, stopCancel := context.WithCancel(context.Background())
+	defer stopCancel()
+	go func() {
+		select {
+		case <-w.stop:
+			stopCancel()
+		case <-stopCtx.Done():
+		}
+	}()
 	flush := func() {
 		if len(batch) == 0 {
 			return
 		}
-		// A signal-cancelled application context must not cancel the final flush.
-		if err := w.store.InsertRequests(context.Background(), batch); err != nil {
-			w.log.Warn("failed to persist request records", "err", err, "count", len(batch))
+		err := w.store.InsertRequests(stopCtx, batch)
+		if err == nil {
+			batch = batch[:0]
+			return
 		}
+		if stopCtx.Err() != nil {
+			// Close interrupted the flush: keep the batch so the bounded final
+			// flush persists it or counts it as dropped.
+			return
+		}
+		w.log.Warn("failed to persist request records", "err", err, "count", len(batch), "dropped", len(batch))
 		batch = batch[:0]
 	}
 	appendRecord := func(record store.Request) {

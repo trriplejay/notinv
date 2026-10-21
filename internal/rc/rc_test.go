@@ -573,3 +573,67 @@ func TestTransportAssignsDistinctKeys(t *testing.T) {
 		}
 	}
 }
+
+// A mid-run flush stalled on a locked table is cancelled by Close, and its
+// batch is carried into the bounded final flush: Close returns within about
+// FlushTimeout and every unpersisted record is counted in one WARN line.
+func TestCloseInterruptsStalledMidRunFlush(t *testing.T) {
+	s, db := openTestStore(t)
+
+	tx, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(t.Context(), "LOCK TABLE requests IN ACCESS EXCLUSIVE MODE"); err != nil {
+		t.Fatalf("lock table: %v", err)
+	}
+
+	var logs bytes.Buffer
+	var logMu sync.Mutex
+	logger := slog.New(slog.NewTextHandler(&lockedWriter{w: &logs, mu: &logMu}, nil))
+	// BatchSize 2 triggers a mid-run flush as soon as two records arrive.
+	w := NewWriter(s, "test", logger, Options{BatchSize: 2, FlushInterval: time.Hour})
+
+	const enqueued = 2
+	for i := 0; i < enqueued; i++ {
+		w.enqueue(store.Request{Script: "stalled", Method: "GET", URL: "https://example.com", StartedAt: time.Now()})
+	}
+	// Let the writer enter the mid-run flush and block on the lock.
+	time.Sleep(300 * time.Millisecond)
+
+	started := time.Now()
+	w.Close()
+	elapsed := time.Since(started)
+	if elapsed >= FlushTimeout+time.Second {
+		t.Errorf("Close took %v, want under %v", elapsed, FlushTimeout+time.Second)
+	}
+
+	logMu.Lock()
+	out := logs.String()
+	logMu.Unlock()
+	if got := strings.Count(out, "failed to persist request records"); got != 1 {
+		t.Errorf("drop warnings = %d, want exactly 1: %s", got, out)
+	}
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, fmt.Sprintf("dropped=%d", enqueued)) {
+		t.Errorf("warning missing dropped=%d: %s", enqueued, out)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if got := requestCount(t, db); got != 0 {
+		t.Errorf("persisted %d rows, want 0 (all counted as dropped)", got)
+	}
+}
+
+type lockedWriter struct {
+	w  io.Writer
+	mu *sync.Mutex
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
