@@ -46,10 +46,10 @@ func TestRemoteOperationsRetryDriverFailures(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		var attempts int
-		onAttempt = func(attempt int) {
+		s.onAttempt = func(attempt int) {
 			attempts++
 		}
-		defer func() { onAttempt = nil }()
+		defer func() { s.onAttempt = nil }()
 
 		// InsertRun must retry through transient termination and write the row once.
 		run := Run{
@@ -85,10 +85,10 @@ func TestRemoteOperationsRetryDriverFailures(t *testing.T) {
 		})
 
 		var attempts int
-		onAttempt = func(attempt int) {
+		s.onAttempt = func(attempt int) {
 			attempts++
 		}
-		defer func() { onAttempt = nil }()
+		defer func() { s.onAttempt = nil }()
 
 		run := Run{
 			Script:     "check_script",
@@ -168,9 +168,7 @@ func TestRetryCancellationAndRecovery(t *testing.T) {
 		}
 	})
 	t.Run("per-attempt deadline exceeded not retried", func(t *testing.T) {
-		orig := perCallTimeout
-		perCallTimeout = 20 * time.Millisecond
-		defer func() { perCallTimeout = orig }()
+		s := &Store{callTimeout: 20 * time.Millisecond}
 
 		attempts := 0
 		err := s.withRetry(t.Context(), func(ctx context.Context) error {

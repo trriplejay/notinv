@@ -324,7 +324,7 @@ func TestShutdownBudget(t *testing.T) {
 	if budget.overall != 7*time.Second || budget.drain != 5*time.Second {
 		t.Fatalf("production budget = %+v", budget)
 	}
-	if total := budget.overall + rc.FinalFlushTimeout; total >= 10*time.Second {
+	if total := budget.overall + rc.FlushTimeout; total >= 10*time.Second {
 		t.Errorf("overall budget plus flush bound = %v, want < 10s", total)
 	}
 	if total := budget.drain + budget.httpShutdown(budget.drain); total > budget.overall || total >= 10*time.Second {

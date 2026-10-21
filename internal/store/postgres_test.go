@@ -592,12 +592,9 @@ func TestPostgresDeleteOlderThan(t *testing.T) {
 // InsertRequests and QueryRequests called with context.Background() each return
 // an error wrapping context.DeadlineExceeded within the per-call bound plus slack.
 func TestPostgresCallDeadlineUnderTableLock(t *testing.T) {
-	orig := perCallTimeout
-	perCallTimeout = 1 * time.Second
-	defer func() { perCallTimeout = orig }()
-
 	dbURL := storetest.DatabaseURL(t)
 	s := openPostgresStore(t, dbURL)
+	s.callTimeout = time.Second
 
 	lockDB, err := sql.Open("pgx", dbURL)
 	if err != nil {
@@ -615,7 +612,7 @@ func TestPostgresCallDeadlineUnderTableLock(t *testing.T) {
 		t.Fatalf("lock tables: %v", err)
 	}
 
-	bound := perCallTimeout
+	bound := s.callTimeout
 	slack := 2 * time.Second
 
 	t.Run("InsertRun", func(t *testing.T) {

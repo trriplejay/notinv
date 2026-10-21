@@ -615,8 +615,8 @@ func TestCloseInterruptsStalledMidRunFlush(t *testing.T) {
 	if got := strings.Count(out, "failed to persist request records"); got != 1 {
 		t.Errorf("drop warnings = %d, want exactly 1: %s", got, out)
 	}
-	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, fmt.Sprintf("dropped=%d", enqueued)) {
-		t.Errorf("warning missing dropped=%d: %s", enqueued, out)
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, fmt.Sprintf("count=%d", enqueued)) {
+		t.Errorf("warning missing count=%d: %s", enqueued, out)
 	}
 
 	if err := tx.Rollback(); err != nil {

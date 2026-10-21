@@ -18,20 +18,25 @@ const (
 	retryCap      = time.Second
 )
 
-var perCallTimeout = 3 * time.Second
-
-var onAttempt func(attempt int)
+// defaultCallTimeout bounds each attempt of a store call. It is generous so a
+// slow but healthy database is waited on; it only catches a server that has
+// stopped answering.
+const defaultCallTimeout = 10 * time.Second
 
 func (s *Store) withRetry(ctx context.Context, fn func(ctx context.Context) error) error {
+	timeout := s.callTimeout
+	if timeout == 0 {
+		timeout = defaultCallTimeout
+	}
 	delay := retryBase
 	for attempt := 0; ; attempt++ {
-		if onAttempt != nil {
-			onAttempt(attempt)
+		if s.onAttempt != nil {
+			s.onAttempt(attempt)
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		attemptCtx, cancel := context.WithTimeout(ctx, perCallTimeout)
+		attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 		err := fn(attemptCtx)
 		cancel()
 		if err == nil {
@@ -62,8 +67,8 @@ func (s *Store) withRetry(ctx context.Context, fn func(ctx context.Context) erro
 
 // isTransient classifies transient connection and concurrency errors that
 // warrant retrying. Transient means connection refused or reset, a lost or
-// terminated connection (SQLSTATE class 08, 57P01), or a serialization conflict
-// (40001, 40P01). Permanent errors (23xxx, 42xxx, 28P01/28000, 3D000),
+// terminated connection (SQLSTATE class 08, 57P01), a server still starting
+// (57P03), or a serialization conflict (40001, 40P01). Permanent errors (23xxx, 42xxx, 28P01/28000, 3D000),
 // context.Canceled and context.DeadlineExceeded are never transient.
 func isTransient(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -71,17 +76,8 @@ func isTransient(err error) bool {
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
-		code := pgErr.SQLState()
-		if code == "" {
-			code = pgErr.Code
-		}
-		if strings.HasPrefix(code, "08") || code == "57P01" || code == "57P03" || code == "40001" || code == "40P01" {
-			return true
-		}
-		if code == "28P01" || code == "28000" || code == "3D000" {
-			return false
-		}
-		return false
+		code := pgErr.Code
+		return strings.HasPrefix(code, "08") || code == "57P01" || code == "57P03" || code == "40001" || code == "40P01"
 	}
 	var connErr *pgconn.ConnectError
 	if errors.As(err, &connErr) {
