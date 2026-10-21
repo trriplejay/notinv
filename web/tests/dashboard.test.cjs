@@ -26,7 +26,7 @@ async function waitForSeries(page, count) {
   }, { name: scriptName, count });
 }
 
-test('dashboard with embedded assets, real Go API and SQLite', async t => {
+test('dashboard with embedded assets, real Go API and Postgres', async t => {
   const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage({ colorScheme: 'light' });

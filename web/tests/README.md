@@ -5,14 +5,16 @@ empty working directory, unknown-path 404s, all API routes and healthz on the re
 mux, and the absence of external URL literals in every embedded asset.
 
 The browser suite runs real Chromium + Chart.js/date-fns against the embedded page,
-real Go API handlers and a temporary SQLite database. The fixture process is opt-in
+real Go API handlers and a throwaway Postgres database. The fixture process is opt-in
 and does not run during ordinary Go tests. Fixture data exists only in tests.
 
-From the repository root, start the assembly in one terminal:
+From the repository root, start the assembly in one terminal (`NOTINV_TEST_DATABASE_URL`
+must name a reachable throwaway Postgres database):
 
 ```sh
 docker run --rm --name notinv-dashboard-browser -p 127.0.0.1:18080:18080 \
   -v "$PWD":/src -w /src -e NOTINV_BROWSER_TEST_LISTEN=:18080 \
+  -e NOTINV_TEST_DATABASE_URL \
   golang:1.26 go test ./cmd/notinv -run '^TestDashboardBrowserServer$' -v -timeout 20m
 ```
 

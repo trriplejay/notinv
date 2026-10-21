@@ -5,7 +5,7 @@ const { chromium } = require('playwright');
 const baseURL = process.env.NOTINV_BROWSER_URL || 'http://127.0.0.1:18080';
 const scriptName = 'checkout & inventory';
 
-test('script pages and slim cards with the real Go API and SQLite', async t => {
+test('script pages and slim cards with the real Go API and Postgres', async t => {
   const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage();
