@@ -64,17 +64,17 @@ func Load() (*Config, error) {
 	}
 
 	if c.DatabaseURL == "" {
-		return nil, errors.New("Postgres DATABASE_URL is required")
+		return nil, errors.New("a Postgres DATABASE_URL is required")
 	}
 	databaseURL, err := url.Parse(c.DatabaseURL)
 	if err != nil {
 		// url.Parse errors include the input URL, which may contain credentials.
-		return nil, errors.New("Postgres DATABASE_URL is required: invalid URL")
+		return nil, errors.New("a Postgres DATABASE_URL is required: invalid URL")
 	}
 	switch databaseURL.Scheme {
 	case "postgres", "postgresql":
 	default:
-		return nil, errors.New("Postgres DATABASE_URL is required")
+		return nil, errors.New("a Postgres DATABASE_URL is required")
 	}
 
 	if (c.DiscordToken == "") != (c.DiscordUserID == "") {

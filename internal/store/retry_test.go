@@ -46,7 +46,7 @@ func TestRemoteOperationsRetryDriverFailures(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		var attempts int
-		s.onAttempt = func(attempt int) {
+		s.onAttempt = func(int) {
 			attempts++
 		}
 		defer func() { s.onAttempt = nil }()
@@ -85,7 +85,7 @@ func TestRemoteOperationsRetryDriverFailures(t *testing.T) {
 		})
 
 		var attempts int
-		s.onAttempt = func(attempt int) {
+		s.onAttempt = func(int) {
 			attempts++
 		}
 		defer func() { s.onAttempt = nil }()
@@ -117,7 +117,7 @@ func TestRetryCancellationAndRecovery(t *testing.T) {
 	transient := errors.New("connection reset")
 	t.Run("recovery", func(t *testing.T) {
 		attempts := 0
-		err := s.withRetry(t.Context(), func(ctx context.Context) error {
+		err := s.withRetry(t.Context(), func(context.Context) error {
 			attempts++
 			if attempts < 3 {
 				return transient
@@ -131,7 +131,7 @@ func TestRetryCancellationAndRecovery(t *testing.T) {
 	t.Run("last cause", func(t *testing.T) {
 		attempts := 0
 		last := errors.New("last connection reset")
-		err := s.withRetry(t.Context(), func(ctx context.Context) error {
+		err := s.withRetry(t.Context(), func(context.Context) error {
 			attempts++
 			if attempts == 4 {
 				return last
@@ -146,7 +146,7 @@ func TestRetryCancellationAndRecovery(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		attempts := 0
-		err := s.withRetry(ctx, func(ctx context.Context) error {
+		err := s.withRetry(ctx, func(context.Context) error {
 			attempts++
 			cancel()
 			return transient
@@ -159,7 +159,7 @@ func TestRetryCancellationAndRecovery(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		attempts := 0
-		err := s.withRetry(ctx, func(ctx context.Context) error {
+		err := s.withRetry(ctx, func(context.Context) error {
 			attempts++
 			return nil
 		})

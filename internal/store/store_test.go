@@ -286,7 +286,7 @@ func TestMigrationIdempotency(t *testing.T) {
 		if err != nil {
 			t.Fatalf("catalog snapshot columns: %v", err)
 		}
-		defer colRows.Close()
+		defer func() { _ = colRows.Close() }()
 		for colRows.Next() {
 			var col catalogColumn
 			if err := colRows.Scan(&col.tableName, &col.columnName, &col.dataType, &col.isNullable); err != nil {
@@ -306,7 +306,7 @@ func TestMigrationIdempotency(t *testing.T) {
 		if err != nil {
 			t.Fatalf("catalog snapshot indexes: %v", err)
 		}
-		defer idxRows.Close()
+		defer func() { _ = idxRows.Close() }()
 		for idxRows.Next() {
 			var idx catalogIndex
 			if err := idxRows.Scan(&idx.indexName, &idx.indexDef); err != nil {
@@ -478,7 +478,7 @@ func TestDatabaseDSN(t *testing.T) {
 }
 
 func TestPrivateErrorsPreserveCause(t *testing.T) {
-	cause := &url.Error{Op: "connect", URL: "postgres://u:private@host", Err: context.DeadlineExceeded}
+	cause := &url.Error{Op: "connect", URL: "postgres://u:private@host", Err: context.DeadlineExceeded} //nolint:gosec // G101 false positive: test URL, not a real credential
 	err := databaseError("query", "postgres", cause)
 	if strings.Contains(err.Error(), "private") || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("redaction or cause preservation failed: %v", err)
