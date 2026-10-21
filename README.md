@@ -9,9 +9,9 @@ copy and register your own script, run the service, and trigger your first DM.
 
 ## 1. Clone and prepare
 
-You need Git and either Go 1.26+ with Make and a C compiler (the build enables CGO),
-or Docker with the Compose plugin. For real notifications, you also need a Discord
-account and a server where you can invite a bot. Turso is optional.
+You need Git, a Postgres database, and either Go 1.26+ with Make or Docker with
+the Compose plugin. For real notifications, you also need a Discord account and a
+server where you can invite a bot.
 
 ```sh
 git clone https://github.com/trriplejay/notinv.git
@@ -45,61 +45,26 @@ Leaving **both empty** runs notifications in **dry-run mode**: the service logs 
 startup warning and logs notification messages instead of contacting Discord.
 Supplying only one of the two is a startup error.
 
-## 3. Database setup: Turso or a local file
+## 3. Database setup
 
-Choose one of these paths. The service opens the database and applies its schema
-migrations at startup; you do not need to create tables by hand.
-
-### Turso
-
-Install the [Turso CLI](https://docs.turso.tech/cli/installation) and sign in to your
-Turso account. Create a database (here named `notinv`), then retrieve its URL and
-an auth token:
-
-```sh
-turso auth login
-turso db create notinv
-turso db show --url notinv
-turso db tokens create notinv
-```
-
-Copy the `libsql://...` URL printed by `turso db show --url` into `DATABASE_URL`
-in `.env`. Copy the token printed by `turso db tokens create` into
-`DATABASE_AUTH_TOKEN`. A `libsql://` URL **requires a nonempty auth token**;
-the service rejects that configuration without one. Keep the token private.
-Turso stores your data remotely, so it needs no local database directory or volume.
-
-### Local file (no Turso needed)
-
-Keep these values from `.env.example`:
+Configure `DATABASE_URL` in `.env` with a `postgres://` connection URL including your credentials:
 
 ```dotenv
-DATABASE_URL=file:./data/notinv.db
-DATABASE_AUTH_TOKEN=
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/notinv?sslmode=disable
 ```
 
-`file:./data/notinv.db` is also the default when `DATABASE_URL` is unset. No auth
-token is needed. For a local run, create the parent directory and ensure it is
-writable by the user running notinv:
-
-```sh
-mkdir -p data
-```
-
-The relative path is resolved from the service's working directory. For container
-persistence, see the volume instructions in the Compose section below.
+The service opens the database and applies its schema migrations at startup; you do not need to create tables by hand.
 
 ## 4. Environment variable reference
 
-These are the **nine central service settings**, matching `.env.example` and
+These are the **eight central service settings**, matching `.env.example` and
 `internal/config/config.go`. Script-specific settings are separate (see below).
 
 | Variable | Default when unset | Meaning / validation |
 | --- | --- | --- |
 | `NOTINV_ENV` | `dev` | One of `dev`, `prod`. `prod` does not register the `example` script. |
 | `NOTINV_LISTEN` | `:8080` | HTTP listen address for the dashboard and API. |
-| `DATABASE_URL` | `file:./data/notinv.db` | Database URL; supported schemes are `file:` and `libsql:`. |
-| `DATABASE_AUTH_TOKEN` | Empty | Required for a `libsql:` URL; not needed for a local file. |
+| `DATABASE_URL` | *(none)* | Postgres database URL; must use the `postgres://` or `postgresql://` scheme. |
 | `NOTINV_DISCORD_TOKEN` | Empty | Discord bot token; set together with the recipient user ID. |
 | `NOTINV_DISCORD_USER_ID` | Empty | Your Discord user ID; both Discord settings empty selects dry-run. |
 | `NOTINV_RETENTION_DAYS` | `30` | Days of history to retain; must be a positive integer. |
@@ -241,7 +206,7 @@ make build   # build ./bin/notinv
 make run     # build and run (Ctrl-C to stop)
 ```
 
-Run from the repo root so `.env` and the local database path resolve as described.
+Run from the repo root so `.env` resolves as described.
 With the default listen address, open <http://localhost:8080> for the dashboard.
 
 ### Docker Compose
@@ -254,19 +219,11 @@ docker compose up
 
 The repository's `docker-compose.yml` defines the `notinv` service, pulls
 `trriplejay/notinv:latest` from Docker Hub (published by the Release workflow on
-every merge to `main`), loads `.env` through `env_file: .env`, and publishes
+every merge to `main`), loads `.env` through `env_file`, and publishes
 `8080:8080` (host port 8080 to container port 8080). Keep `NOTINV_LISTEN=:8080`
 for that mapping, and open <http://localhost:8080>. The image is built for
 `linux/amd64` only; on Apple Silicon, Docker runs it under emulation. To run
 local, unmerged script changes, use `make dev` (see below).
-
-For `DATABASE_URL=file:./data/notinv.db`, the Compose file includes a
-**commented-out** `./data:/app/data` volume. To keep the database across container
-replacement, create `./data` on the host, make it writable by the container's
-nonroot user, and uncomment the `volumes:` block and that mount in
-`docker-compose.yml`. Without the mount, local database data lives in the
-container and is lost when the container is replaced. A remote libsql/Turso
-database stores data remotely and needs **no volume**; leave the block commented.
 
 ### Hot reload (Docker)
 
@@ -277,9 +234,7 @@ make dev
 Runs the service in a development container (`Dockerfile.dev`,
 `docker-compose.dev.yml`) with the repo mounted and [air](https://github.com/air-verse/air)
 watching it: saving a `.go` file or anything under `web/static` rebuilds and
-restarts the service. `.env` is loaded as usual, except `DATABASE_URL` is forced
-to `file:/tmp/notinv.db` inside the container, so the database is discarded when
-you stop `make dev` (Ctrl-C) and the container is removed. Only the Go build and
+restarts the service. `.env` is loaded as usual. Only the Go build and
 module caches are kept in named volumes so rebuilds stay fast; remove them with
 `docker compose -f docker-compose.dev.yml down -v`.
 
@@ -323,13 +278,14 @@ web/static/         dashboard frontend assets (embedded into the binary)
 
 ## Development
 
-Requires Go 1.26+ and a C compiler for the CGO-enabled build. Linting requires
+Requires Go 1.26+. Running tests with the race detector (`make test`, `make ci`)
+requires a C compiler for CGO. Linting requires
 [golangci-lint](https://golangci-lint.run/welcome/install/) v2 (CI uses v2.14.0).
 
 ```sh
 make build   # build ./bin/notinv
 make run     # build and run (Ctrl-C to stop)
-make dev     # hot-reloading Docker container with a throwaway database
+make dev     # hot-reloading Docker container
 make test    # go test -race ./...
 make lint    # golangci-lint run ./...
 make fmt     # format Go source with gofmt

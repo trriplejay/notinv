@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -173,7 +174,7 @@ func TestWarnIfDryRun(t *testing.T) {
 	}
 }
 
-// CLM-13: the repository's example is valid dotenv with all eight settings.
+// CLM-1, CLM-13: the repository's example is valid dotenv with all eight settings and a Postgres DATABASE_URL.
 func TestEnvExampleParses(t *testing.T) {
 	values, err := godotenv.Read("../../.env.example")
 	if err != nil {
@@ -196,6 +197,13 @@ func TestEnvExampleParses(t *testing.T) {
 		if _, ok := values[key]; !ok {
 			t.Errorf("example missing %s", key)
 		}
+	}
+	u, err := url.Parse(values["DATABASE_URL"])
+	if err != nil {
+		t.Fatalf("parse DATABASE_URL: %v", err)
+	}
+	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
+		t.Errorf("example DATABASE_URL scheme = %q, want postgres or postgresql", u.Scheme)
 	}
 }
 
