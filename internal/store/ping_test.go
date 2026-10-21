@@ -94,7 +94,7 @@ func TestOpenRedaction(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 			defer cancel()
 
-			_, err := Open(ctx, tt.url, "")
+			_, err := Open(ctx, tt.url)
 			if err == nil {
 				t.Fatal("expected Open to fail for unreachable host, got nil")
 			}

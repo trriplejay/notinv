@@ -16,7 +16,7 @@ import (
 func TestDashboardEmbeddedAndAPIRoutes(t *testing.T) {
 	// Neither the dashboard nor its dependencies may depend on the working directory.
 	t.Chdir(t.TempDir())
-	st, err := store.Open(context.Background(), storetest.DatabaseURL(t), "")
+	st, err := store.Open(context.Background(), storetest.DatabaseURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestDashboardEmbeddedAndAPIRoutes(t *testing.T) {
 
 func TestDashboardScriptsSchedule(t *testing.T) {
 	t.Chdir(t.TempDir())
-	st, err := store.Open(context.Background(), storetest.DatabaseURL(t), "")
+	st, err := store.Open(context.Background(), storetest.DatabaseURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

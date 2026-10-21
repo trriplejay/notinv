@@ -178,7 +178,7 @@ func TestTransportErrorRecord(t *testing.T) {
 func openTestStore(t *testing.T) (*store.Store, *sql.DB) {
 	t.Helper()
 	dsn := storetest.DatabaseURL(t)
-	s, err := store.Open(t.Context(), dsn, "")
+	s, err := store.Open(t.Context(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +422,7 @@ func TestWriterFlushTriggers(t *testing.T) {
 
 func TestShutdownFlushAfterCancellation(t *testing.T) {
 	dbURL := storetest.DatabaseURL(t)
-	s, err := store.Open(t.Context(), dbURL, "")
+	s, err := store.Open(t.Context(), dbURL)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

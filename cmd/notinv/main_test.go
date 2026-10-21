@@ -173,7 +173,7 @@ func TestWarnIfDryRun(t *testing.T) {
 	}
 }
 
-// CLM-13: the repository's example is valid dotenv with all nine settings.
+// CLM-13: the repository's example is valid dotenv with all eight settings.
 func TestEnvExampleParses(t *testing.T) {
 	values, err := godotenv.Read("../../.env.example")
 	if err != nil {
@@ -186,7 +186,6 @@ func TestEnvExampleParses(t *testing.T) {
 		"NOTINV_RETENTION_DAYS",
 		"NOTINV_LOG_LEVEL",
 		"NOTINV_LOG_FORMAT",
-		"DATABASE_AUTH_TOKEN",
 		"NOTINV_DISCORD_TOKEN",
 		"NOTINV_DISCORD_USER_ID",
 	}
@@ -523,7 +522,7 @@ func TestServicesRecordScriptRequests(t *testing.T) {
 		w.WriteHeader(http.StatusTeapot)
 	}))
 	defer server.Close()
-	st, err := store.Open(t.Context(), storetest.DatabaseURL(t), "")
+	st, err := store.Open(t.Context(), storetest.DatabaseURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

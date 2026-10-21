@@ -18,7 +18,7 @@ import (
 func openTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	dsn := storetest.DatabaseURL(t)
-	s, err := Open(t.Context(), dsn, "")
+	s, err := Open(t.Context(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +325,7 @@ func TestMigrationIdempotency(t *testing.T) {
 	if err := s.migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	second, err := Open(ctx, dsn, "")
+	second, err := Open(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +387,7 @@ func TestOpenFailure(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := Open(t.Context(), tc.dsn, token)
+			s, err := Open(t.Context(), tc.dsn)
 			if s != nil {
 				if closeErr := s.Close(); closeErr != nil {
 					t.Error(closeErr)
@@ -407,7 +407,7 @@ func TestOpenFailure(t *testing.T) {
 func TestCanceledOpen(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	s, err := Open(ctx, storetest.DatabaseURL(t), "")
+	s, err := Open(ctx, storetest.DatabaseURL(t))
 	if s != nil {
 		if closeErr := s.Close(); closeErr != nil {
 			t.Error(closeErr)
@@ -436,7 +436,7 @@ func TestMigrationFailureRollsBack(t *testing.T) {
 	if _, err := db.ExecContext(t.Context(), `CREATE TABLE runs (existing TEXT)`); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(t.Context(), dsn, "")
+	s, err := Open(t.Context(), dsn)
 	if s != nil {
 		if closeErr := s.Close(); closeErr != nil {
 			t.Error(closeErr)
@@ -457,30 +457,23 @@ func TestMigrationFailureRollsBack(t *testing.T) {
 }
 
 func TestDatabaseDSN(t *testing.T) {
-	const token = "secret +&/?=" //nolint:gosec // G101 false positive: fake auth token test fixture, not a real credential
 	local := "file:./test.db?mode=rwc"
-	if dsn, scheme, err := databaseDSN(local, token); err != nil || dsn != local || scheme != "file" {
+	if dsn, scheme, err := databaseDSN(local); err != nil || dsn != local || scheme != "file" {
 		t.Fatalf("local DSN = %q, %q, %v", dsn, scheme, err)
 	}
-	dsn, scheme, err := databaseDSN("libsql://example.invalid?other=value&authToken=old", token)
-	if err != nil || scheme != "libsql" {
+	dsn, scheme, err := databaseDSN("libsql://example.invalid?other=value")
+	if err != nil || scheme != "libsql" || dsn != "libsql://example.invalid?other=value" {
 		t.Fatalf("remote scheme = %q, err = %v", scheme, err)
 	}
-	u, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if u.Query().Get("authToken") != token || u.Query().Get("other") != "value" || len(u.Query()["authToken"]) != 1 {
-		t.Fatal("auth token not encoded or existing query not preserved")
-	}
-	if dsn, _, err := databaseDSN("libsql://example.invalid?other=value", ""); err != nil || dsn != "libsql://example.invalid?other=value" {
-		t.Fatal("empty token changed DSN")
+	pg := "postgres://u:p@localhost:5432/notinv?sslmode=disable"
+	if dsn, scheme, err := databaseDSN(pg); err != nil || dsn != pg || scheme != "postgres" {
+		t.Fatalf("postgres DSN = %q, %q, %v", dsn, scheme, err)
 	}
 }
 
 func TestPrivateErrorsPreserveCause(t *testing.T) {
-	cause := &url.Error{Op: "connect", URL: "libsql://host?authToken=private", Err: context.DeadlineExceeded}
-	err := databaseError("query", "libsql", cause)
+	cause := &url.Error{Op: "connect", URL: "postgres://u:private@host", Err: context.DeadlineExceeded}
+	err := databaseError("query", "postgres", cause)
 	if strings.Contains(err.Error(), "private") || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("redaction or cause preservation failed: %v", err)
 	}

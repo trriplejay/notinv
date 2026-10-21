@@ -18,7 +18,7 @@ import (
 
 func openPostgresStore(t *testing.T, databaseURL string) *Store {
 	t.Helper()
-	s, err := Open(t.Context(), databaseURL, "")
+	s, err := Open(t.Context(), databaseURL)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestPostgresConcurrentMigrate(t *testing.T) {
 				go func() {
 					defer wg.Done()
 					<-start
-					stores[g], errs[g] = Open(ctx, dbURL, "")
+					stores[g], errs[g] = Open(ctx, dbURL)
 				}()
 			}
 			close(start)
@@ -762,7 +762,7 @@ func TestPostgresOpenRetry(t *testing.T) {
 		// Closed port on localhost (54329)
 		closedPortURL := "postgres://user:pass@127.0.0.1:54329/testdb"
 		start := time.Now()
-		_, err := Open(t.Context(), closedPortURL, "")
+		_, err := Open(t.Context(), closedPortURL)
 		elapsed := time.Since(start)
 
 		if err == nil {
@@ -788,7 +788,7 @@ func TestPostgresOpenRetry(t *testing.T) {
 		u.User = url.UserPassword(user, "wrong_password_never_valid_12345")
 
 		start := time.Now()
-		_, err = Open(t.Context(), u.String(), "")
+		_, err = Open(t.Context(), u.String())
 		elapsed := time.Since(start)
 
 		if err == nil {
@@ -807,7 +807,7 @@ func TestPostgresOpenRetry(t *testing.T) {
 		u.Path = "/nonexistent_db_3d000_never_exists"
 
 		start := time.Now()
-		_, err = Open(t.Context(), u.String(), "")
+		_, err = Open(t.Context(), u.String())
 		elapsed := time.Since(start)
 
 		if err == nil {
@@ -824,7 +824,7 @@ func TestPostgresOpenRetry(t *testing.T) {
 		cancel() // pre-cancelled
 
 		start := time.Now()
-		_, err := Open(ctx, closedPortURL, "")
+		_, err := Open(ctx, closedPortURL)
 		elapsed := time.Since(start)
 
 		if err == nil {

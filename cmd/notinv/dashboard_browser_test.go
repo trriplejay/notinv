@@ -20,7 +20,7 @@ func TestDashboardBrowserServer(t *testing.T) {
 		return
 	}
 	ctx := context.Background()
-	st, err := store.Open(ctx, "file:"+filepath.Join(t.TempDir(), "browser.db"), "")
+	st, err := store.Open(ctx, "file:"+filepath.Join(t.TempDir(), "browser.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

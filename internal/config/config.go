@@ -13,16 +13,15 @@ import (
 // Config holds the validated startup settings for notinv.
 // String and LogValue redact credentials; the fields retain their original values.
 type Config struct {
-	Env               string
-	Listen            string
-	DatabaseURL       string
-	RetentionDays     int
-	LogLevel          string
-	LogFormat         string
-	DatabaseAuthToken string
-	DiscordToken      string
-	DiscordUserID     string
-	DiscordDryRun     bool
+	Env           string
+	Listen        string
+	DatabaseURL   string
+	RetentionDays int
+	LogLevel      string
+	LogFormat     string
+	DiscordToken  string
+	DiscordUserID string
+	DiscordDryRun bool
 }
 
 // Load reads the environment and validates startup settings.
@@ -30,14 +29,13 @@ type Config struct {
 // notifications; supplying only one of the two credentials is an error.
 func Load() (*Config, error) {
 	c := Config{
-		Env:               envOrDefault("NOTINV_ENV", "dev"),
-		Listen:            envOrDefault("NOTINV_LISTEN", ":8080"),
-		DatabaseURL:       envOrDefault("DATABASE_URL", "file:./data/notinv.db"),
-		LogLevel:          envOrDefault("NOTINV_LOG_LEVEL", "info"),
-		LogFormat:         envOrDefault("NOTINV_LOG_FORMAT", "text"),
-		DatabaseAuthToken: os.Getenv("DATABASE_AUTH_TOKEN"),
-		DiscordToken:      os.Getenv("NOTINV_DISCORD_TOKEN"),
-		DiscordUserID:     os.Getenv("NOTINV_DISCORD_USER_ID"),
+		Env:           envOrDefault("NOTINV_ENV", "dev"),
+		Listen:        envOrDefault("NOTINV_LISTEN", ":8080"),
+		DatabaseURL:   os.Getenv("DATABASE_URL"),
+		LogLevel:      envOrDefault("NOTINV_LOG_LEVEL", "info"),
+		LogFormat:     envOrDefault("NOTINV_LOG_FORMAT", "text"),
+		DiscordToken:  os.Getenv("NOTINV_DISCORD_TOKEN"),
+		DiscordUserID: os.Getenv("NOTINV_DISCORD_USER_ID"),
 	}
 
 	retention, err := strconv.Atoi(envOrDefault("NOTINV_RETENTION_DAYS", "30"))
@@ -65,20 +63,18 @@ func Load() (*Config, error) {
 		return nil, errors.New("NOTINV_LOG_FORMAT must be text or json")
 	}
 
+	if c.DatabaseURL == "" {
+		return nil, errors.New("Postgres DATABASE_URL is required")
+	}
 	databaseURL, err := url.Parse(c.DatabaseURL)
 	if err != nil {
 		// url.Parse errors include the input URL, which may contain credentials.
-		return nil, errors.New("DATABASE_URL must be a valid URL")
+		return nil, errors.New("Postgres DATABASE_URL is required: invalid URL")
 	}
 	switch databaseURL.Scheme {
-	case "file":
-	case "libsql":
-		if c.DatabaseAuthToken == "" {
-			return nil, errors.New("DATABASE_AUTH_TOKEN is required for a libsql DATABASE_URL")
-		}
 	case "postgres", "postgresql":
 	default:
-		return nil, errors.New("DATABASE_URL scheme must be file or libsql")
+		return nil, errors.New("Postgres DATABASE_URL is required")
 	}
 
 	if (c.DiscordToken == "") != (c.DiscordUserID == "") {
@@ -114,7 +110,6 @@ func (c Config) LogValue() slog.Value {
 		slog.Int("retention_days", c.RetentionDays),
 		slog.String("log_level", c.LogLevel),
 		slog.String("log_format", c.LogFormat),
-		slog.String("database_auth_token", "[REDACTED]"),
 		slog.String("discord_token", "[REDACTED]"),
 		slog.String("discord_user_id", c.DiscordUserID),
 		slog.Bool("discord_dry_run", c.DiscordDryRun),

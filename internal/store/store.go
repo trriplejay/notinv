@@ -68,8 +68,8 @@ var (
 // postgres: and postgresql: URLs use the pgx driver; file: and libsql: URLs use
 // the libsql driver. Credentials are never
 // printed in returned errors; the original cause remains available via Unwrap.
-func Open(ctx context.Context, databaseURL, authToken string) (*Store, error) {
-	dsn, scheme, err := databaseDSN(databaseURL, authToken)
+func Open(ctx context.Context, databaseURL string) (*Store, error) {
+	dsn, scheme, err := databaseDSN(databaseURL)
 	if err != nil {
 		return nil, databaseError("open", scheme, err)
 	}
@@ -143,23 +143,18 @@ func Open(ctx context.Context, databaseURL, authToken string) (*Store, error) {
 	return s, nil
 }
 
-func databaseDSN(databaseURL, authToken string) (string, string, error) {
+func databaseDSN(databaseURL string) (string, string, error) {
 	u, err := url.Parse(databaseURL)
 	if err != nil {
 		return "", "unknown", err
 	}
 	switch u.Scheme {
 	case "postgres", "postgresql":
-		// Postgres carries credentials in the URL itself; authToken is unused.
+		// Postgres carries credentials in the URL itself.
 		return databaseURL, "postgres", nil
 	case "file":
 		return databaseURL, u.Scheme, nil
 	case "libsql":
-		if authToken != "" {
-			q := u.Query()
-			q.Set("authToken", authToken)
-			u.RawQuery = q.Encode()
-		}
 		return u.String(), u.Scheme, nil
 	default:
 		return "", "unknown", errors.New("unsupported database scheme")
