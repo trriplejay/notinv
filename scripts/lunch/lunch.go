@@ -43,8 +43,8 @@ func New() *Script { return &Script{} }
 // Name returns the stable identifier used for this script's logs and results.
 func (*Script) Name() string { return "lunch" }
 
-// Schedule fires at 06:00 Los Angeles local time, across daylight saving changes.
-func (*Script) Schedule() string { return "CRON_TZ=" + pacificZone + " 0 6 * * *" }
+// Schedule fires on weekdays at 06:00 Los Angeles local time, across daylight saving changes.
+func (*Script) Schedule() string { return "CRON_TZ=" + pacificZone + " 0 6 * * 1-5" }
 
 // Run skips its first call (the runner's startup run); every later call fetches
 // today's menu and sends it. A failed fetch is reported by notification and

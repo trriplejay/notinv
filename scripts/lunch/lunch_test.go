@@ -12,6 +12,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/robfig/cron/v3"
+
 	"github.com/trriplejay/notinv/internal/runner"
 	"github.com/trriplejay/notinv/internal/store"
 )
@@ -83,8 +85,79 @@ func primed(at time.Time) *Script {
 
 func TestIdentity(t *testing.T) {
 	s := New()
-	if s.Name() != "lunch" || s.Schedule() != "CRON_TZ=America/Los_Angeles 0 6 * * *" {
+	if s.Name() != "lunch" || s.Schedule() != "CRON_TZ=America/Los_Angeles 0 6 * * 1-5" {
 		t.Fatalf("identity = %q %q", s.Name(), s.Schedule())
+	}
+}
+
+// CLM-2: the schedule parses and fires on weekdays (Monday through Friday) at 06:00 Pacific.
+func TestScheduleWeekdaysAtSixPacific(t *testing.T) {
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	sched, err := parser.Parse(New().Schedule())
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	loc, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+
+	// Sunday 2026-03-08 12:00 Pacific -> next should be Monday 2026-03-09 06:00 Pacific.
+	sun := time.Date(2026, time.March, 8, 12, 0, 0, 0, loc)
+	got := sched.Next(sun)
+	want := time.Date(2026, time.March, 9, 6, 0, 0, 0, loc)
+	if !got.Equal(want) {
+		t.Errorf("from Sunday: got %v, want %v", got, want)
+	}
+
+	// Each weekday at 06:00 should advance to the next weekday at 06:00.
+	for _, day := range []struct {
+		cur  time.Time
+		want time.Time
+	}{
+		{time.Date(2026, time.March, 9, 6, 0, 0, 0, loc), time.Date(2026, time.March, 10, 6, 0, 0, 0, loc)},  // Mon -> Tue
+		{time.Date(2026, time.March, 10, 6, 0, 0, 0, loc), time.Date(2026, time.March, 11, 6, 0, 0, 0, loc)}, // Tue -> Wed
+		{time.Date(2026, time.March, 11, 6, 0, 0, 0, loc), time.Date(2026, time.March, 12, 6, 0, 0, 0, loc)}, // Wed -> Thu
+		{time.Date(2026, time.March, 12, 6, 0, 0, 0, loc), time.Date(2026, time.March, 13, 6, 0, 0, 0, loc)}, // Thu -> Fri
+		{time.Date(2026, time.March, 13, 6, 0, 0, 0, loc), time.Date(2026, time.March, 16, 6, 0, 0, 0, loc)}, // Fri -> Mon
+	} {
+		if next := sched.Next(day.cur); !next.Equal(day.want) {
+			t.Errorf("Next(%v) = %v, want %v", day.cur, next, day.want)
+		}
+	}
+}
+
+// CLM-3: the schedule skips Saturday and Sunday entirely.
+func TestScheduleSkipsWeekend(t *testing.T) {
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	sched, err := parser.Parse(New().Schedule())
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	loc, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+
+	// Friday 2026-03-13 06:00:01 Pacific (after Friday run) -> next is Monday 2026-03-16 06:00.
+	friAfterRun := time.Date(2026, time.March, 13, 6, 0, 1, 0, loc)
+	wantMon := time.Date(2026, time.March, 16, 6, 0, 0, 0, loc)
+	if got := sched.Next(friAfterRun); !got.Equal(wantMon) {
+		t.Errorf("Next(friAfterRun) = %v, want %v", got, wantMon)
+	}
+
+	// Saturday 2026-03-14 06:00 Pacific -> next is Monday 2026-03-16 06:00.
+	sat := time.Date(2026, time.March, 14, 6, 0, 0, 0, loc)
+	if got := sched.Next(sat); !got.Equal(wantMon) {
+		t.Errorf("Next(sat) = %v, want %v", got, wantMon)
+	}
+
+	// Sunday 2026-03-15 06:00 Pacific -> next is Monday 2026-03-16 06:00.
+	sun := time.Date(2026, time.March, 15, 6, 0, 0, 0, loc)
+	if got := sched.Next(sun); !got.Equal(wantMon) {
+		t.Errorf("Next(sun) = %v, want %v", got, wantMon)
 	}
 }
 
@@ -289,14 +362,16 @@ func TestNotifyErrorPropagates(t *testing.T) {
 	}
 }
 
-// CLM-1: under the real runner the startup run is silent and recorded OK, and
-// the next run fires at 06:00 Pacific with the Pacific-date request.
+// CLM-4: under the real runner the startup run is silent and recorded OK,
+// weekend days are skipped, and the next run fires at Monday 06:00 Pacific with
+// the Pacific-date request.
 func TestRunnerSchedulesLunchAtSixPacific(t *testing.T) {
 	t.Setenv("LUNCH_SCHOOL", "")
 	synctest.Test(t, func(t *testing.T) {
-		// The bubble starts at 2000-01-01T00:00Z (Dec 31 16:00 PST); the next
-		// 06:00 PST is 14:00Z on Jan 1, so the Pacific date is 01-01-2000.
-		const wantURL = "https://api.mealviewer.com/api/v4/school/Bryant/01-01-2000/01-01-2000/0"
+		// The bubble starts at 2000-01-01T00:00Z (Fri Dec 31 16:00 PST).
+		// Sat 2000-01-01 and Sun 2000-01-02 are skipped.
+		// Next run fires on Mon 2000-01-03 at 06:00 PST (14:00Z).
+		const wantURL = "https://api.mealviewer.com/api/v4/school/Bryant/01-03-2000/01-03-2000/0"
 		h := newHarness(respond(http.StatusOK, menuJSON))
 		st := &fakeRunStore{}
 		ctx, cancel := context.WithCancel(context.Background())
@@ -317,17 +392,32 @@ func TestRunnerSchedulesLunchAtSixPacific(t *testing.T) {
 			t.Fatalf("startup recorded %+v, want one OK run", runs)
 		}
 
-		time.Sleep(13 * time.Hour) // 13:00Z: before 06:00 PST.
+		// Advance past Saturday 06:00 PST (2000-01-01T14:00Z).
+		time.Sleep(15 * time.Hour)
 		synctest.Wait()
 		if reqs, notes := h.counts(); reqs != 0 || notes != 0 {
-			t.Fatalf("fired early (UTC 06:00 schedule?): %d requests, %d notifications", reqs, notes)
+			t.Fatalf("Saturday fired: %d requests, %d notifications, want none", reqs, notes)
+		}
+		if runs := st.snapshot(); len(runs) != 1 || !runs[0].OK {
+			t.Fatalf("Saturday changed runs: %+v, want one OK run", runs)
 		}
 
-		time.Sleep(2 * time.Hour) // Past 14:00Z.
+		// Advance past Sunday 06:00 PST (2000-01-02T14:00Z).
+		time.Sleep(24 * time.Hour)
+		synctest.Wait()
+		if reqs, notes := h.counts(); reqs != 0 || notes != 0 {
+			t.Fatalf("Sunday fired: %d requests, %d notifications, want none", reqs, notes)
+		}
+		if runs := st.snapshot(); len(runs) != 1 || !runs[0].OK {
+			t.Fatalf("Sunday changed runs: %+v, want one OK run", runs)
+		}
+
+		// Advance past Monday 06:00 PST (2000-01-03T14:00Z).
+		time.Sleep(24 * time.Hour)
 		synctest.Wait()
 		reqs, notes := h.counts()
 		if reqs != 1 || notes != 1 {
-			t.Fatalf("scheduled run made %d requests and %d notifications, want 1 and 1", reqs, notes)
+			t.Fatalf("scheduled Monday run made %d requests and %d notifications, want 1 and 1", reqs, notes)
 		}
 		if h.urls[0] != wantURL {
 			t.Errorf("url = %s, want %s", h.urls[0], wantURL)

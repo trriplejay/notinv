@@ -34,7 +34,7 @@ import (
 func TestDefaultScripts(t *testing.T) {
 	schedules := map[string]string{
 		"nintendo": "@every 1m",
-		"lunch":    "CRON_TZ=America/Los_Angeles 0 6 * * *",
+		"lunch":    "CRON_TZ=America/Los_Angeles 0 6 * * 1-5",
 	}
 	for _, tt := range []struct {
 		env         string
