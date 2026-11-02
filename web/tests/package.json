@@ -2,7 +2,8 @@
   "name": "notinv-dashboard-tests",
   "private": true,
   "scripts": {
-    "test": "node --test dashboard.test.cjs"
+    "test": "node --test dashboard.test.cjs",
+    "test:toggle": "node --test toggle.test.cjs"
   },
   "devDependencies": {
     "playwright": "1.58.2"
