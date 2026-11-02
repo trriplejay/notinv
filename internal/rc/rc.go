@@ -24,9 +24,6 @@ type Options struct {
 // FlushTimeout even when the database stalls.
 const FlushTimeout = 2 * time.Second
 
-// FinalFlushTimeout is an alias for FlushTimeout.
-const FinalFlushTimeout = FlushTimeout
-
 // Writer persists buffered request records from a single background goroutine.
 // Close it before closing the store. Records arriving after Close are dropped.
 type Writer struct {
@@ -178,7 +175,7 @@ func (w *Writer) run() {
 			// flush persists it or counts it as dropped.
 			return
 		}
-		w.log.Warn("failed to persist request records", "err", err, "count", len(batch), "dropped", len(batch))
+		w.log.Warn("failed to persist request records", "err", err, "count", len(batch))
 		batch = batch[:0]
 	}
 	appendRecord := func(record store.Request) {
@@ -216,7 +213,7 @@ drained:
 		chunkSize := min(len(batch), w.batchSize)
 		chunk := batch[:chunkSize]
 		if err := w.store.InsertRequests(ctx, chunk); err != nil {
-			w.log.Warn("failed to persist request records", "err", err, "count", len(batch), "dropped", len(batch))
+			w.log.Warn("failed to persist request records", "err", err, "count", len(batch))
 			return
 		}
 		batch = batch[chunkSize:]

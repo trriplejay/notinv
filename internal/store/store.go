@@ -25,8 +25,11 @@ func RandomKey() string {
 
 // Store persists check results in a Postgres database.
 type Store struct {
-	db     *sql.DB
-	scheme string
+	db *sql.DB
+	// callTimeout overrides defaultCallTimeout when non-zero; tests shorten it.
+	callTimeout time.Duration
+	// onAttempt, when set, is called before each withRetry attempt; tests count attempts.
+	onAttempt func(attempt int)
 }
 
 // Request records the result of one HTTP request. Err is nil on success.
@@ -77,7 +80,7 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		}
 		return nil, databaseError("open", scheme, err)
 	}
-	s := &Store{db: db, scheme: scheme}
+	s := &Store{db: db}
 
 	start := time.Now()
 	delay := openInitialBackoff
@@ -188,11 +191,7 @@ func databaseError(operation, scheme string, err error) error {
 }
 
 func (s *Store) wrap(operation string, err error) error {
-	scheme := s.scheme
-	if scheme == "" {
-		scheme = "postgres"
-	}
-	return databaseError(operation, scheme, err)
+	return databaseError(operation, "postgres", err)
 }
 
 // InsertRequests inserts the entire batch in one transaction. An empty batch

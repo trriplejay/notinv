@@ -360,7 +360,7 @@ func TestPostgresConcurrentMigrate(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer rows.Close()
+				defer func() { _ = rows.Close() }()
 				var out [][2]int64
 				for rows.Next() {
 					var r [2]int64
@@ -413,7 +413,7 @@ func TestPostgresConcurrentAccess(t *testing.T) {
 	s := openPostgresStore(t, storetest.DatabaseURL(t))
 	ctx := t.Context()
 
-	if max := s.db.Stats().MaxOpenConnections; max == 1 {
+	if maxOpen := s.db.Stats().MaxOpenConnections; maxOpen == 1 {
 		t.Fatalf("MaxOpenConnections = 1, want 0 (unlimited) or > 1")
 	}
 
@@ -472,7 +472,7 @@ func TestPostgresConcurrentAccess(t *testing.T) {
 	if len(gotReqs) != wantReqs || len(gotRuns) != wantRuns {
 		t.Errorf("rows present requests=%d runs=%d, want %d and %d", len(gotReqs), len(gotRuns), wantReqs, wantRuns)
 	}
-	if max := s.db.Stats().MaxOpenConnections; max == 1 {
+	if maxOpen := s.db.Stats().MaxOpenConnections; maxOpen == 1 {
 		t.Errorf("MaxOpenConnections = 1 after load, want 0 or > 1")
 	}
 }
@@ -515,6 +515,7 @@ func TestPostgresDeleteOlderThan(t *testing.T) {
 
 		for _, table := range []string{"requests", "runs"} {
 			var before, at, after int
+			//nolint:gosec // G201: table comes from a fixed list of names
 			query := fmt.Sprintf(`SELECT
 				count(*) FILTER (WHERE started_at < $1),
 				count(*) FILTER (WHERE started_at = $1),
@@ -592,12 +593,9 @@ func TestPostgresDeleteOlderThan(t *testing.T) {
 // InsertRequests and QueryRequests called with context.Background() each return
 // an error wrapping context.DeadlineExceeded within the per-call bound plus slack.
 func TestPostgresCallDeadlineUnderTableLock(t *testing.T) {
-	orig := perCallTimeout
-	perCallTimeout = 1 * time.Second
-	defer func() { perCallTimeout = orig }()
-
 	dbURL := storetest.DatabaseURL(t)
 	s := openPostgresStore(t, dbURL)
+	s.callTimeout = time.Second
 
 	lockDB, err := sql.Open("pgx", dbURL)
 	if err != nil {
@@ -615,7 +613,7 @@ func TestPostgresCallDeadlineUnderTableLock(t *testing.T) {
 		t.Fatalf("lock tables: %v", err)
 	}
 
-	bound := perCallTimeout
+	bound := s.callTimeout
 	slack := 2 * time.Second
 
 	t.Run("InsertRun", func(t *testing.T) {
@@ -774,7 +772,7 @@ func TestPostgresOpenRetry(t *testing.T) {
 		}()
 
 		// Closed port on localhost (54329)
-		closedPortURL := "postgres://user:pass@127.0.0.1:54329/testdb"
+		closedPortURL := "postgres://user:pass@127.0.0.1:54329/testdb" //nolint:gosec // G101 false positive: test URL, not a real credential
 		start := time.Now()
 		_, err := Open(t.Context(), closedPortURL)
 		elapsed := time.Since(start)
@@ -833,7 +831,7 @@ func TestPostgresOpenRetry(t *testing.T) {
 	})
 
 	t.Run("prompt return on cancelled context", func(t *testing.T) {
-		closedPortURL := "postgres://user:pass@127.0.0.1:54329/testdb"
+		closedPortURL := "postgres://user:pass@127.0.0.1:54329/testdb" //nolint:gosec // G101 false positive: test URL, not a real credential
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel() // pre-cancelled
 

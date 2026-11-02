@@ -1,3 +1,4 @@
+// Package storetest provides per-test Postgres schemas for store-backed tests.
 package storetest
 
 import (
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	// Register the pgx database/sql driver used to create and drop test schemas.
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
