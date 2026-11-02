@@ -179,7 +179,7 @@ MealViewer URL (defaults to `Bryant` when unset).
 In addition to `scripts/example` (registered only when `NOTINV_ENV=dev`, the
 default), the service includes built-in scripts:
 
-- `nintendo` (`scripts/nintendo`): monitors the Electric Ocarina of Time storefront offer every minute (`@every 1m`) and notifies on transitions into stock.
+- `nintendo` (`scripts/nintendo`): monitors the Electric Ocarina of Time storefront offer every 30 seconds (`@every 30s`) and notifies on transitions into stock.
 - `lunch` (`scripts/lunch`): sends the MealViewer school lunch menu weekdays (Monday–Friday) at 6:00am Pacific (`America/Los_Angeles`, following daylight saving; schedule `CRON_TZ=America/Los_Angeles 0 6 * * 1-5`). It does **not** send a message when the service starts up (only at the 6:00am run). It lists that day's lunch items one per line. If no menu is found, it sends a message saying no menu was found; on retrieval failures, it sends a message indicating the menu could not be retrieved and records that run as failed. It reads the `LUNCH_SCHOOL` environment variable (the school name in the MealViewer URL, default `Bryant`).
 
 ### Register in the entrypoint
