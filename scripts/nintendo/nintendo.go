@@ -34,8 +34,8 @@ func New() *Script { return &Script{} }
 // Name returns the stable identifier used for this script's logs and results.
 func (*Script) Name() string { return "nintendo" }
 
-// Schedule requests a run every minute using the @every syntax.
-func (*Script) Schedule() string { return "@every 1m" }
+// Schedule requests a run every 30 seconds using the @every syntax.
+func (*Script) Schedule() string { return "@every 30s" }
 
 // Run checks the product and notifies only on a transition into purchasable.
 // Failed checks are not observations and leave the last known state intact.
