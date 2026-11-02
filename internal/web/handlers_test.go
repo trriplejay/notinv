@@ -29,10 +29,16 @@ var testNow = time.Date(2026, time.October, 5, 12, 0, 0, 0, time.UTC)
 
 func fixedNow() time.Time { return testNow }
 
+type setCall struct {
+	script  string
+	enabled bool
+}
+
 type fakeStore struct {
 	runs           []store.Run
 	requests       []store.Request
 	disabled       map[string]bool
+	setCalls       []setCall
 	latestErr      error
 	runsErr        error
 	requestsErr    error
@@ -62,6 +68,7 @@ func (f *fakeStore) ScriptEnabled(ctx context.Context, script string) (bool, err
 
 func (f *fakeStore) SetScriptEnabled(ctx context.Context, script string, enabled bool) error {
 	f.ctx, f.script = ctx, script
+	f.setCalls = append(f.setCalls, setCall{script: script, enabled: enabled})
 	if f.setEnabledErr != nil {
 		return f.setEnabledErr
 	}
@@ -544,17 +551,24 @@ func TestScriptEnabledHandler(t *testing.T) {
 		if f.ctx != t.Context() {
 			t.Errorf("request context not forwarded to SetScriptEnabled")
 		}
+		if len(f.setCalls) != 1 || f.setCalls[0] != (setCall{script: "alpha", enabled: false}) {
+			t.Errorf("setCalls = %+v, want [{alpha false}]", f.setCalls)
+		}
 	})
 
 	t.Run("unknown script 404", func(t *testing.T) {
 		f := &fakeStore{}
 		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/scripts/unknown/enabled", strings.NewReader(`{"enabled":false}`))
+		r.Header.Set("Content-Type", "application/json")
 		w := serveRequest(t, "POST /api/scripts/{name}/enabled", r, NewScriptEnabledHandler(f, schedules))
 		if w.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404", w.Code)
 		}
 		if len(f.disabled) != 0 {
 			t.Errorf("store modified on 404: %v", f.disabled)
+		}
+		if len(f.setCalls) != 0 {
+			t.Errorf("setCalls on 404 = %+v, want none", f.setCalls)
 		}
 	})
 
@@ -570,6 +584,9 @@ func TestScriptEnabledHandler(t *testing.T) {
 			if len(f.disabled) != 0 {
 				t.Errorf("store modified on 400 for body %q: %v", badBody, f.disabled)
 			}
+			if len(f.setCalls) != 0 {
+				t.Errorf("setCalls on 400 for body %q = %+v, want none", badBody, f.setCalls)
+			}
 		}
 	})
 
@@ -580,6 +597,17 @@ func TestScriptEnabledHandler(t *testing.T) {
 		w := serveRequest(t, "POST /api/scripts/{name}/enabled", r, NewScriptEnabledHandler(f, schedules))
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", w.Code)
+		}
+		body := w.Body.String()
+		if strings.Contains(body, `"name"`) || strings.Contains(body, `"enabled"`) {
+			t.Errorf("500 response body contains DTO fields: %q", body)
+		}
+		var dto scriptStateDTO
+		if err := json.Unmarshal(w.Body.Bytes(), &dto); err == nil && (dto.Name != "" || dto.Enabled) {
+			t.Errorf("500 response body decoded to DTO: %+v", dto)
+		}
+		if len(f.setCalls) != 1 || f.setCalls[0] != (setCall{script: "alpha", enabled: false}) {
+			t.Errorf("setCalls on 500 = %+v, want [{alpha false}]", f.setCalls)
 		}
 	})
 
@@ -598,6 +626,9 @@ func TestScriptEnabledHandler(t *testing.T) {
 			if len(f.disabled) != 0 {
 				t.Errorf("store modified on 415 for content-type %q: %v", ct, f.disabled)
 			}
+			if len(f.setCalls) != 0 {
+				t.Errorf("setCalls on 415 for content-type %q = %+v, want none", ct, f.setCalls)
+			}
 		}
 	})
 
@@ -609,6 +640,9 @@ func TestScriptEnabledHandler(t *testing.T) {
 		assertJSON(t, w, `{"name":"alpha","enabled":false}`)
 		if !f.disabled["alpha"] {
 			t.Errorf("expected alpha to be disabled in store")
+		}
+		if len(f.setCalls) != 1 || f.setCalls[0] != (setCall{script: "alpha", enabled: false}) {
+			t.Errorf("setCalls = %+v, want [{alpha false}]", f.setCalls)
 		}
 	})
 
@@ -623,6 +657,9 @@ func TestScriptEnabledHandler(t *testing.T) {
 		}
 		if len(f.disabled) != 0 {
 			t.Errorf("store modified on 403: %v", f.disabled)
+		}
+		if len(f.setCalls) != 0 {
+			t.Errorf("setCalls on 403 = %+v, want none", f.setCalls)
 		}
 	})
 }

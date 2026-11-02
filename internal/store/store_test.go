@@ -380,6 +380,15 @@ func TestMigrationV1ToV2(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	seedRequests := []Request{
+		{Key: "seed-req-1", Script: "test-script-1", Method: "GET", URL: "https://example.com/api", StartedAt: now, DurationMs: 85, StatusCode: 200},
+	}
+	for _, req := range seedRequests {
+		if _, err := rawDB.ExecContext(ctx, `INSERT INTO requests (key, script, method, url, started_at, duration_ms, status_code, error) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			req.Key, req.Script, req.Method, req.URL, req.StartedAt.UnixMilli(), req.DurationMs, req.StatusCode, req.Err); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := rawDB.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -421,6 +430,21 @@ func TestMigrationV1ToV2(t *testing.T) {
 		t.Fatalf("failing runs rows changed or missing: got %+v", failingRuns)
 	}
 
+	reqs, err := st.QueryRequests(ctx, "test-script-1", now.Add(-time.Minute), now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reqs) != 1 || reqs[0].Script != seedRequests[0].Script || reqs[0].Method != seedRequests[0].Method || reqs[0].URL != seedRequests[0].URL || reqs[0].DurationMs != seedRequests[0].DurationMs || reqs[0].StatusCode != seedRequests[0].StatusCode || reqs[0].Err != nil {
+		t.Fatalf("requests rows changed or missing: got %+v", reqs)
+	}
+	var reqKey string
+	if err := st.db.QueryRowContext(ctx, `SELECT key FROM requests WHERE script = $1`, seedRequests[0].Script).Scan(&reqKey); err != nil {
+		t.Fatal(err)
+	}
+	if reqKey != seedRequests[0].Key {
+		t.Fatalf("requests key changed: got %q, want %q", reqKey, seedRequests[0].Key)
+	}
+
 	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -440,6 +464,42 @@ func TestMigrationV1ToV2(t *testing.T) {
 	}
 	if migrationCount != len(migrations) {
 		t.Fatalf("schema_migrations count after reopen = %d, want %d", migrationCount, len(migrations))
+	}
+}
+
+func TestMigrationsVersionTwoOnce(t *testing.T) {
+	if len(migrations) == 0 {
+		t.Fatal("migrations slice is empty")
+	}
+	var v2Count int
+	seen := make(map[int]bool)
+	prev := 0
+	for i, m := range migrations {
+		if seen[m.version] {
+			t.Errorf("migration[%d] duplicate version %d", i, m.version)
+		}
+		seen[m.version] = true
+		if m.version <= prev {
+			t.Errorf("migration[%d] version %d not strictly increasing (prev %d)", i, m.version, prev)
+		}
+		prev = m.version
+
+		if m.version == 2 {
+			v2Count++
+			var createsScriptState bool
+			for _, stmt := range m.sql {
+				if strings.Contains(stmt, "script_state") {
+					createsScriptState = true
+					break
+				}
+			}
+			if !createsScriptState {
+				t.Errorf("migration version 2 does not create script_state: %v", m.sql)
+			}
+		}
+	}
+	if v2Count != 1 {
+		t.Fatalf("expected exactly one version 2 migration, found %d", v2Count)
 	}
 }
 
