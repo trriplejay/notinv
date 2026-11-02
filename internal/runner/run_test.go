@@ -33,19 +33,21 @@ func (s fakeScript) Run(ctx context.Context, rc *Context) error {
 }
 
 type fakeStore struct {
-	mu       sync.Mutex
-	runs     []store.Run
-	inserted chan struct{}
-	err      error
-	enabled  map[string]bool
-	stateErr map[string]error
+	mu           sync.Mutex
+	runs         []store.Run
+	inserted     chan struct{}
+	err          error
+	enabled      map[string]bool
+	stateErr     map[string]error
+	enabledCalls map[string]int
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		inserted: make(chan struct{}, 16),
-		enabled:  make(map[string]bool),
-		stateErr: make(map[string]error),
+		inserted:     make(chan struct{}, 16),
+		enabled:      make(map[string]bool),
+		stateErr:     make(map[string]error),
+		enabledCalls: make(map[string]int),
 	}
 }
 
@@ -63,6 +65,10 @@ func (s *fakeStore) InsertRun(_ context.Context, run store.Run) error {
 func (s *fakeStore) ScriptEnabled(_ context.Context, script string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.enabledCalls == nil {
+		s.enabledCalls = make(map[string]int)
+	}
+	s.enabledCalls[script]++
 	if s.stateErr != nil {
 		if err, ok := s.stateErr[script]; ok {
 			return false, err
@@ -74,6 +80,15 @@ func (s *fakeStore) ScriptEnabled(_ context.Context, script string) (bool, error
 		}
 	}
 	return true, nil
+}
+
+func (s *fakeStore) enabledCheckCount(script string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.enabledCalls == nil {
+		return 0
+	}
+	return s.enabledCalls[script]
 }
 
 func (s *fakeStore) setEnabled(script string, enabled bool) {
@@ -761,11 +776,63 @@ func TestRunSkipsWhenDisabledAndScriptEnabledFails(t *testing.T) {
 	})
 }
 
-// TestRunSkipsWhenScriptEnabledFails asserts that when the enabled-state read fails
-// with no prior state (e.g. at startup), the runner fails OPEN: it logs a warning,
-// runs the script, and records the run in the store.
-func TestRunSkipsWhenScriptEnabledFails(t *testing.T) {
-	TestRunFailsOpenWhenScriptEnabledFails(t)
+// Governor ruling: remember last known state on read error.
+// If the script was previously read as enabled and a subsequent read fails,
+// it remains enabled, continues running on each scheduled tick, logs a warning,
+// and records run rows in the store.
+func TestRunKeepsRunningWhenEnabledAndScriptEnabledFails(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var buf bytes.Buffer
+		rc := &Context{Log: slog.New(slog.NewTextHandler(&buf, nil))}
+		runs := newFakeStore()
+
+		var calls atomic.Int32
+		script := fakeScript{name: "enabled-then-fail", schedule: "@every 1s", run: func(context.Context, *Context) error {
+			calls.Add(1)
+			return nil
+		}}
+
+		// Initial state is enabled: successful read returns enabled.
+		runs.setEnabled("enabled-then-fail", true)
+
+		stop := startTestRunner(t, script, rc, runs)
+		defer stop()
+
+		// Startup check (tick 0): read succeeds, returns enabled -> script runs once immediately.
+		synctest.Wait()
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("startup: script ran %d times when enabled, want 1", n)
+		}
+		recorded := runs.snapshot()
+		if len(recorded) != 1 || recorded[0].Script != "enabled-then-fail" || !recorded[0].OK {
+			t.Fatalf("startup: recorded runs = %+v, want 1 successful run", recorded)
+		}
+
+		// Subsequent read now fails with an error (e.g. database down).
+		runs.setStateErr("enabled-then-fail", errors.New("state db unavailable"))
+
+		// Advance 2 ticks. Each tick should log WARN, remember it was enabled, and execute.
+		for i := 0; i < 2; i++ {
+			time.Sleep(time.Second)
+			synctest.Wait()
+		}
+
+		if n := calls.Load(); n != 3 {
+			t.Fatalf("script ran %d times after read failed when previously enabled, want 3", n)
+		}
+		recorded = runs.snapshot()
+		if len(recorded) != 3 {
+			t.Fatalf("recorded runs = %+v, want 3", recorded)
+		}
+		for i, r := range recorded {
+			if r.Script != "enabled-then-fail" || !r.OK {
+				t.Errorf("run %d = %+v, want script=enabled-then-fail ok=true", i, r)
+			}
+		}
+		if !strings.Contains(buf.String(), `level=WARN msg="check script enabled failed" script=enabled-then-fail error="state db unavailable"`) {
+			t.Errorf("missing warn log for state lookup failure: %s", buf.String())
+		}
+	})
 }
 
 // When no prior read has succeeded (e.g. startup read fails), runner fails open.
@@ -826,17 +893,11 @@ func TestRunFailsOpenWhenScriptEnabledFails(t *testing.T) {
 	})
 }
 
-// TestRunClearingErrorResumesRunning asserts that after transient read errors,
-// clearing the error resumes normal execution.
-func TestRunClearingErrorResumesRunning(t *testing.T) {
-	TestRunFailsOpenWhenScriptEnabledFails(t)
-}
-
 // Governor ruling / fk_0ffa8916e7be: recovery path after read error.
 // A script reads as disabled, then a read fails (it stays skipped using last-known state),
 // then the error clears and the stored state is read again: if still disabled, it stays
 // skipped; once enabled again, it runs at its scheduled ticks.
-func TestRunRecoversAfterReadFailureWhenEnabledAgain(t *testing.T) {
+func TestRunRecoversAfterScriptEnabledReadFailureWhenEnabledAgain(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var buf bytes.Buffer
 		rc := &Context{Log: slog.New(slog.NewTextHandler(&buf, nil))}
@@ -916,7 +977,7 @@ func TestRunRecoversAfterReadFailureWhenEnabledAgain(t *testing.T) {
 // clearing the error while stored state is disabled returns to reading the real
 // state and skips execution (no new Run call and no new run row). Setting it to
 // enabled subsequently resumes scheduled execution.
-func TestRunRecoversFromInitialReadFailureToDisabledThenEnabled(t *testing.T) {
+func TestRunRecoversFromInitialScriptEnabledFailureToDisabledThenEnabled(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var buf bytes.Buffer
 		rc := &Context{Log: slog.New(slog.NewTextHandler(&buf, nil))}
@@ -971,6 +1032,84 @@ func TestRunRecoversFromInitialReadFailureToDisabledThenEnabled(t *testing.T) {
 		}
 		if !recorded[1].OK || recorded[1].Script != "init-fail-recovery" {
 			t.Errorf("run after re-enable = %+v, want script=init-fail-recovery ok=true", recorded[1])
+		}
+	})
+}
+
+// CLM-1 / fk_0f15bc29f95f: Last-known-state fallback must use the latest successfully read state,
+// not the initial/first read state.
+// Tick 1 (startup): reads enabled -> script runs and run row is recorded.
+// Tick 2: reads disabled -> script is skipped (no run, no run row).
+// Ticks 3-4: read fails with error -> runner must use the last-known state (disabled),
+// so script stays skipped (no new Run calls, no new run rows).
+// We verify that the runner is alive and still ticking by checking that store read
+// attempts continue to increment on each tick.
+func TestRunUsesLastEnabledNotFirstWhenScriptEnabledFails(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var buf bytes.Buffer
+		rc := &Context{Log: slog.New(slog.NewTextHandler(&buf, nil))}
+		runs := newFakeStore()
+
+		var calls atomic.Int32
+		script := fakeScript{name: "last-not-first", schedule: "@every 1s", run: func(context.Context, *Context) error {
+			calls.Add(1)
+			return nil
+		}}
+
+		// Tick 1 (startup): script is enabled.
+		runs.setEnabled("last-not-first", true)
+
+		stop := startTestRunner(t, script, rc, runs)
+		defer stop()
+
+		synctest.Wait()
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("startup: calls = %d, want 1", n)
+		}
+		if recorded := runs.snapshot(); len(recorded) != 1 {
+			t.Fatalf("startup: recorded runs = %+v, want 1", recorded)
+		}
+		if count := runs.enabledCheckCount("last-not-first"); count != 1 {
+			t.Fatalf("startup: store read attempts = %d, want 1", count)
+		}
+
+		// Tick 2: state changes to disabled. Read succeeds and script is skipped.
+		runs.setEnabled("last-not-first", false)
+		time.Sleep(time.Second)
+		synctest.Wait()
+
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("tick 2 (disabled): calls = %d, want 1", n)
+		}
+		if recorded := runs.snapshot(); len(recorded) != 1 {
+			t.Fatalf("tick 2 (disabled): recorded runs = %+v, want 1", recorded)
+		}
+		if count := runs.enabledCheckCount("last-not-first"); count != 2 {
+			t.Fatalf("tick 2 (disabled): store read attempts = %d, want 2", count)
+		}
+
+		// Ticks 3 & 4: enabled read starts failing with an error.
+		// Last-known state was disabled (not enabled from startup).
+		// Runner must skip execution, insert no new run rows, but keep ticking.
+		runs.setStateErr("last-not-first", errors.New("state db outage"))
+
+		for tick := 3; tick <= 4; tick++ {
+			time.Sleep(time.Second)
+			synctest.Wait()
+
+			if n := calls.Load(); n != 1 {
+				t.Fatalf("tick %d (read error, last-known disabled): calls = %d, want 1", tick, n)
+			}
+			if recorded := runs.snapshot(); len(recorded) != 1 {
+				t.Fatalf("tick %d (read error, last-known disabled): recorded runs = %+v, want 1", tick, recorded)
+			}
+			if count := runs.enabledCheckCount("last-not-first"); count != tick {
+				t.Fatalf("tick %d (read error): store read attempts = %d, want %d", tick, count, tick)
+			}
+		}
+
+		if !strings.Contains(buf.String(), `level=WARN msg="check script enabled failed" script=last-not-first error="state db outage"`) {
+			t.Errorf("missing warn log for state lookup failure: %s", buf.String())
 		}
 	})
 }
