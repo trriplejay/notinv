@@ -40,7 +40,7 @@ func (b *trackingBody) Close() error { b.closed = true; return b.closeErr }
 // TestScriptSchedule checks both the declaration and the runner's cron parser.
 func TestScriptSchedule(t *testing.T) {
 	script := &Script{}
-	if script.Name() != "nintendo" || script.Schedule() != "@every 1m" {
+	if script.Name() != "nintendo" || script.Schedule() != "@every 30s" {
 		t.Fatal("unexpected script identity or schedule")
 	}
 	sched, err := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor).Parse(script.Schedule())
@@ -49,8 +49,8 @@ func TestScriptSchedule(t *testing.T) {
 	}
 	t0 := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
 	t1 := sched.Next(t0)
-	if t1.Sub(t0) != time.Minute || sched.Next(t1).Sub(t1) != time.Minute {
-		t.Fatal("successive fire times must advance by one minute")
+	if t1.Sub(t0) != 30*time.Second || sched.Next(t1).Sub(t1) != 30*time.Second {
+		t.Fatal("successive fire times must advance by 30 seconds")
 	}
 }
 
