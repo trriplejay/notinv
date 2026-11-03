@@ -24,8 +24,8 @@ function makeScript(name, enabled = true) {
     okRuns: 1,
     failedRuns: 0,
     uptime: 1.0,
-    averageDurationMs: 45.0,
-    p95DurationMs: 80.0,
+    avgLatency: 45.0,
+    p95Latency: 80.0,
     enabled,
     latest: {
       ok: true,
@@ -486,6 +486,110 @@ test('enable/disable toggle component tests on landing and script pages', async 
       await page.clock.fastForward(30000);
       await page.waitForFunction(() => document.querySelector('#toggle')?.textContent === 'Enable');
       assert.equal(await btn.textContent(), 'Enable');
+      await page.close();
+    }
+  });
+
+  await t.test('REQ-1 no credential (both pages): toggle POST carries no authorization or cookie header, targets only that script, once per click', async () => {
+    for (const target of [
+      { label: 'landing', other: 'B', url: `${fakeOrigin}/`, name: 'A', card: true, ready: () => document.querySelectorAll('.card').length === 2, btn: '.toggle-btn', flipped: () => [...document.querySelectorAll('.card')].find(c => c.querySelector('h2 a')?.textContent === 'A')?.querySelector('.toggle-btn')?.textContent === 'Enable' },
+      { label: 'script page', other: 'Y', url: `${fakeOrigin}/script.html?name=X`, name: 'X', ready: () => document.querySelector('#toggle')?.style.display !== 'none', btn: '#toggle', flipped: () => document.querySelector('#toggle')?.textContent === 'Enable' }
+    ]) {
+      const page = await browser.newPage();
+      const scripts = [makeScript(target.name, true), makeScript(target.other, true)];
+      const posts = [];
+
+      await routePage(page, {
+        getScripts: () => scripts,
+        onPostEnabled: async (scriptName, req, route) => {
+          const headers = req.headers();
+          posts.push({ name: scriptName, pathname: new URL(req.url()).pathname, headers });
+          const body = req.postDataJSON();
+          return route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ name: scriptName, enabled: body.enabled })
+          });
+        }
+      });
+
+      await page.goto(target.url);
+      await page.waitForFunction(target.ready);
+      const btn = target.card ? page.locator('.card').filter({ has: page.getByRole('heading', { name: target.name, exact: true }) }).locator('.toggle-btn') : page.locator(target.btn);
+      assert.equal(await btn.textContent(), 'Disable', target.label);
+
+      await btn.click();
+      await page.waitForFunction(target.flipped);
+
+      assert.equal(posts.length, 1, `${target.label}: exactly one POST per click`);
+      assert.equal(posts[0].name, target.name, target.label);
+      assert.equal(posts[0].pathname, `/api/scripts/${target.name}/enabled`, target.label);
+      assert.equal('authorization' in posts[0].headers, false, `${target.label}: no authorization header`);
+      assert.equal('cookie' in posts[0].headers, false, `${target.label}: no cookie header`);
+      assert.equal(posts.some(p => p.name === target.other), false, `${target.label}: no POST for ${target.other}`);
+      await page.close();
+    }
+  });
+
+  await t.test('REQ-1 disabling changes only the button label (both pages)', async () => {
+    // Landing page: card A (and B) compared before/after; relative times are not compared.
+    {
+      const page = await browser.newPage();
+      const scripts = [makeScript('A', true), makeScript('B', true)];
+      await routePage(page, { getScripts: () => scripts });
+      await page.goto(`${fakeOrigin}/`);
+      await page.waitForFunction(() => document.querySelectorAll('.card').length === 2);
+
+      const cardA = page.locator('.card').filter({ has: page.getByRole('heading', { name: 'A', exact: true }) });
+      const cardB = page.locator('.card').filter({ has: page.getByRole('heading', { name: 'B', exact: true }) });
+      const snapshot = card => card.evaluate(el => {
+        const clone = el.cloneNode(true);
+        clone.querySelector('.toggle-btn').remove();
+        return { className: el.className, text: clone.textContent.replace(/\s+/g, ' ').trim() };
+      });
+      const hasDisabledText = () => page.evaluate(() => /\bDisabled\b/.test(document.body.textContent));
+
+      const beforeA = await snapshot(cardA);
+      const beforeBHtml = await cardB.evaluate(el => el.outerHTML);
+      assert.equal(await hasDisabledText(), false);
+
+      await cardA.locator('.toggle-btn').click();
+      await page.waitForFunction(() => {
+        const elA = [...document.querySelectorAll('.card')].find(c => c.querySelector('h2 a')?.textContent === 'A');
+        return elA?.querySelector('.toggle-btn')?.textContent === 'Enable';
+      });
+
+      assert.deepEqual(await snapshot(cardA), beforeA);
+      assert.equal(await hasDisabledText(), false);
+      assert.equal(await cardB.evaluate(el => el.outerHTML), beforeBHtml);
+      await page.close();
+    }
+
+    // Script page: everything except #toggle and #status is unchanged.
+    {
+      const page = await browser.newPage();
+      const scripts = [makeScript('X', true)];
+      await routePage(page, { getScripts: () => scripts });
+      await page.goto(`${fakeOrigin}/script.html?name=X`);
+      await page.waitForFunction(() => document.querySelector('#toggle')?.style.display !== 'none');
+
+      const snapshot = () => page.evaluate(() => {
+        const clone = document.body.cloneNode(true);
+        clone.querySelectorAll('#toggle, #status, script').forEach(n => n.remove());
+        return {
+          bodyClass: document.body.className,
+          text: clone.textContent.replace(/\s+/g, ' ').trim(),
+          disabledBadge: /\bDisabled\b/.test(document.body.textContent)
+        };
+      });
+
+      const before = await snapshot();
+      assert.equal(before.disabledBadge, false);
+
+      await page.locator('#toggle').click();
+      await page.waitForFunction(() => document.querySelector('#toggle')?.textContent === 'Enable');
+
+      assert.deepEqual(await snapshot(), before);
       await page.close();
     }
   });
