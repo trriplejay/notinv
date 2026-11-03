@@ -29,12 +29,13 @@ import (
 )
 
 // TestDefaultScripts verifies that the service's runnable set includes the
-// Nintendo and lunch scripts with their schedules in every environment, and the
+// Nintendo, lunch, and nerdygurdy scripts with their schedules in every environment, and the
 // example script only in dev.
 func TestDefaultScripts(t *testing.T) {
 	schedules := map[string]string{
-		"nintendo": "@every 30s",
-		"lunch":    "CRON_TZ=America/Los_Angeles 0 6 * * 1-5",
+		"nintendo":   "@every 30s",
+		"lunch":      "CRON_TZ=America/Los_Angeles 0 6 * * 1-5",
+		"nerdygurdy": "CRON_TZ=Europe/Amsterdam * 19-22 * * 0",
 	}
 	for _, tt := range []struct {
 		env         string
