@@ -100,7 +100,7 @@ type countingScript struct {
 
 func (s countingScript) Name() string     { return s.name }
 func (s countingScript) Schedule() string { return s.schedule }
-func (s countingScript) Run(ctx context.Context, _ *runner.Context) error {
+func (s countingScript) Run(_ context.Context, _ *runner.Context) error {
 	s.calls.Add(1)
 	return nil
 }
@@ -181,7 +181,9 @@ func TestDashboardScriptDisableAndRestart(t *testing.T) {
 
 		// Stop runner 1
 		cancelRunner()
-		<-runnerDone
+		if err := <-runnerDone; err != nil {
+			t.Fatalf("runner.Run returned error: %v", err)
+		}
 
 		// 3. Restart: Close store, re-Open it, reset counter, start a fresh runner.Run.
 		if err := st.Close(); err != nil {
@@ -219,7 +221,9 @@ func TestDashboardScriptDisableAndRestart(t *testing.T) {
 		}
 
 		cancelRestart()
-		<-restartDone
+		if err := <-restartDone; err != nil {
+			t.Fatalf("restarted runner.Run returned error: %v", err)
+		}
 
 		// 4. Assert GET /api/scripts/{name}/runs still returns earlier rows.
 		{

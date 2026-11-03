@@ -600,7 +600,7 @@ func TestRunDisabledMidFlightAndReEnabled(t *testing.T) {
 		release := make(chan struct{})
 		var calls atomic.Int32
 
-		script := fakeScript{name: "flight", schedule: "* * * * *", run: func(ctx context.Context, rc *Context) error {
+		script := fakeScript{name: "flight", schedule: "* * * * *", run: func(ctx context.Context, _ *Context) error {
 			calls.Add(1)
 			if calls.Load() == 1 {
 				close(inRun)

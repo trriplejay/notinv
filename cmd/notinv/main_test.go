@@ -580,7 +580,7 @@ func TestStartRunnersDisabledScript(t *testing.T) {
 				insertCalls.Add(1)
 				return nil
 			},
-			enabled: func(_ context.Context, name string) (bool, error) {
+			enabled: func(_ context.Context, _ string) (bool, error) {
 				return false, nil
 			},
 		}
