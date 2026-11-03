@@ -61,9 +61,11 @@ const maxWait = time.Minute
 // simulate a suspend.
 var wallNow = func() time.Time { return time.Now().Round(0) }
 
-// RunStore persists the outcome of each completed script run.
+// RunStore persists the outcome of each completed script run and reports
+// whether a script is currently enabled.
 type RunStore interface {
 	InsertRun(ctx context.Context, run storepkg.Run) error
+	ScriptEnabled(ctx context.Context, script string) (bool, error)
 }
 
 // Run schedules one script, executing and recording its runs sequentially.
@@ -79,6 +81,9 @@ func Run(ctx context.Context, script Script, rc *Context, store RunStore) error 
 		return err
 	}
 
+	var hasLastEnabled bool
+	var lastEnabled bool
+
 	for first := true; ; first = false {
 		if !first && !waitUntil(ctx, sched.Next(wallNow())) {
 			return nil
@@ -86,6 +91,28 @@ func Run(ctx context.Context, script Script, rc *Context, store RunStore) error 
 		// Prefer shutdown if the timer and cancellation became ready together.
 		if ctx.Err() != nil {
 			return nil
+		}
+
+		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		enabled, err := store.ScriptEnabled(checkCtx, script.Name())
+		cancel()
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			rc.Log.WarnContext(ctx, "check script enabled failed", slog.String("script", script.Name()), slog.Any("error", err))
+			if hasLastEnabled {
+				enabled = lastEnabled
+			} else {
+				enabled = true
+			}
+		} else {
+			lastEnabled = enabled
+			hasLastEnabled = true
+		}
+
+		if !enabled {
+			continue
 		}
 
 		rc.Log.InfoContext(ctx, "run start", slog.String("script", script.Name()))

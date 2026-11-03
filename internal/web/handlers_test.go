@@ -19,6 +19,7 @@ import (
 
 var (
 	_ ScriptLister   = (*store.Store)(nil)
+	_ ScriptEnabler  = (*store.Store)(nil)
 	_ RunQuerier     = (*store.Store)(nil)
 	_ RequestQuerier = (*store.Store)(nil)
 	_ Pinger         = (*store.Store)(nil)
@@ -28,12 +29,21 @@ var testNow = time.Date(2026, time.October, 5, 12, 0, 0, 0, time.UTC)
 
 func fixedNow() time.Time { return testNow }
 
+type setCall struct {
+	script  string
+	enabled bool
+}
+
 type fakeStore struct {
 	runs           []store.Run
 	requests       []store.Request
+	disabled       map[string]bool
+	setCalls       []setCall
 	latestErr      error
 	runsErr        error
 	requestsErr    error
+	enabledErr     error
+	setEnabledErr  error
 	pingErr        error
 	pingCalls      int
 	blockUntilDone bool
@@ -43,6 +53,30 @@ type fakeStore struct {
 	script         string
 	since          time.Time
 	until          time.Time
+}
+
+func (f *fakeStore) ScriptEnabled(ctx context.Context, script string) (bool, error) {
+	f.ctx, f.script = ctx, script
+	if f.enabledErr != nil {
+		return false, f.enabledErr
+	}
+	if f.disabled != nil && f.disabled[script] {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (f *fakeStore) SetScriptEnabled(ctx context.Context, script string, enabled bool) error {
+	f.ctx, f.script = ctx, script
+	f.setCalls = append(f.setCalls, setCall{script: script, enabled: enabled})
+	if f.setEnabledErr != nil {
+		return f.setEnabledErr
+	}
+	if f.disabled == nil {
+		f.disabled = make(map[string]bool)
+	}
+	f.disabled[script] = !enabled
+	return nil
 }
 
 func (f *fakeStore) LatestRun(ctx context.Context, script string) (*store.Run, error) {
@@ -96,9 +130,13 @@ func (f *fakeStore) Ping(ctx context.Context) error {
 
 func serve(t *testing.T, pattern, target string, handler http.Handler) *httptest.ResponseRecorder {
 	t.Helper()
+	return serveRequest(t, pattern, httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil), handler)
+}
+
+func serveRequest(t *testing.T, pattern string, r *http.Request, handler http.Handler) *httptest.ResponseRecorder {
+	t.Helper()
 	mux := http.NewServeMux()
 	mux.Handle(pattern, handler)
-	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 	return w
@@ -138,11 +176,12 @@ func assertWindow(t *testing.T, f *fakeStore, script string, since time.Time) {
 func TestHandlerConstructors(t *testing.T) {
 	f := &fakeStore{}
 	for name, handler := range map[string]http.Handler{
-		"scripts":  NewScriptsHandler(f, nil, nil),
-		"runs":     NewRunsHandler(f, nil),
-		"requests": NewRequestsHandler(f, nil),
-		"series":   NewSeriesHandler(f, nil),
-		"health":   NewHealthHandler(f),
+		"scripts":        NewScriptsHandler(f, nil, nil),
+		"script-enabled": NewScriptEnabledHandler(f, map[string]string{"alpha": ""}),
+		"runs":           NewRunsHandler(f, nil),
+		"requests":       NewRequestsHandler(f, nil),
+		"series":         NewSeriesHandler(f, nil),
+		"health":         NewHealthHandler(f),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if handler == nil || reflect.ValueOf(handler).IsNil() {
@@ -164,8 +203,8 @@ func TestScriptsSummary(t *testing.T) {
 	}}
 	w := serve(t, "GET /api/scripts", "/api/scripts", NewScriptsHandler(f, map[string]string{"alpha": "", "beta": ""}, fixedNow))
 	assertJSON(t, w, `[
-		{"name":"alpha","latest":{"time":"2026-10-05T12:00:00Z","ok":false,"error":"check failed"},"uptime":0.6666666666666666,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":2,"failedRuns":1},
-		{"name":"beta","latest":{"time":"2026-10-05T12:00:00Z","ok":true,"error":null},"uptime":1,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":1,"failedRuns":0}
+		{"name":"alpha","latest":{"time":"2026-10-05T12:00:00Z","ok":false,"error":"check failed"},"uptime":0.6666666666666666,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":2,"failedRuns":1,"enabled":true},
+		{"name":"beta","latest":{"time":"2026-10-05T12:00:00Z","ok":true,"error":null},"uptime":1,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":1,"failedRuns":0,"enabled":true}
 	]`)
 	assertWindow(t, f, "beta", testNow.Add(-7*24*time.Hour))
 }
@@ -175,7 +214,7 @@ func TestScriptsWithoutRuns(t *testing.T) {
 	f := &fakeStore{requests: []store.Request{{Script: "request-only", StartedAt: testNow, URL: "https://example.com"}}}
 	w := serve(t, "GET /api/scripts", "/api/scripts", NewScriptsHandler(f, map[string]string{"request-only": ""}, fixedNow))
 	// JSON parsing rejects NaN/Infinity; exact equality also distinguishes null/absent.
-	assertJSON(t, w, `[{"name":"request-only","latest":null,"uptime":0,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0}]`)
+	assertJSON(t, w, `[{"name":"request-only","latest":null,"uptime":0,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0,"enabled":true}]`)
 }
 
 // Latency statistics use raw requests in the card's fixed seven-day window.
@@ -207,8 +246,8 @@ func TestScriptsLatencies(t *testing.T) {
 			// A since parameter must not override the summary card's fixed window.
 			w := serve(t, "GET /api/scripts", "/api/scripts?since=2026-10-05T12:00:00Z", NewScriptsHandler(f, map[string]string{"alpha": "", "beta": ""}, fixedNow))
 			assertJSON(t, w, fmt.Sprintf(`[
-				{"name":"alpha","latest":null,"uptime":0,"schedule":"","avgLatency":%g,"p95Latency":%g,"okRuns":0,"failedRuns":0},
-				{"name":"beta","latest":null,"uptime":0,"schedule":"","avgLatency":23,"p95Latency":23,"okRuns":0,"failedRuns":0}
+				{"name":"alpha","latest":null,"uptime":0,"schedule":"","avgLatency":%g,"p95Latency":%g,"okRuns":0,"failedRuns":0,"enabled":true},
+				{"name":"beta","latest":null,"uptime":0,"schedule":"","avgLatency":23,"p95Latency":23,"okRuns":0,"failedRuns":0,"enabled":true}
 			]`, tc.avg, tc.p95))
 			assertWindow(t, f, "beta", since)
 		})
@@ -227,9 +266,9 @@ func TestScriptsSchedules(t *testing.T) {
 	schedules := map[string]string{"alpha": "@every 5m", "beta": "0 * * * *", "unused": "@daily"}
 	w := serve(t, "GET /api/scripts", "/api/scripts", NewScriptsHandler(f, schedules, fixedNow))
 	assertJSON(t, w, `[
-		{"name":"alpha","latest":null,"uptime":0,"schedule":"@every 5m","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0},
-		{"name":"beta","latest":null,"uptime":0,"schedule":"0 * * * *","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0},
-		{"name":"unused","latest":null,"uptime":0,"schedule":"@daily","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0}
+		{"name":"alpha","latest":null,"uptime":0,"schedule":"@every 5m","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0,"enabled":true},
+		{"name":"beta","latest":null,"uptime":0,"schedule":"0 * * * *","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0,"enabled":true},
+		{"name":"unused","latest":null,"uptime":0,"schedule":"@daily","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0,"enabled":true}
 	]`)
 }
 
@@ -420,7 +459,7 @@ func TestInvalidSince(t *testing.T) {
 
 func TestStoreFailures(t *testing.T) {
 	failure := errors.New("private database detail")
-	for _, operation := range []string{"latest", "script-runs", "script-requests", "runs", "requests", "series"} {
+	for _, operation := range []string{"latest", "script-runs", "script-requests", "script-enabled", "runs", "requests", "series"} {
 		t.Run(operation, func(t *testing.T) {
 			f := &fakeStore{runs: []store.Run{{Script: "alpha", StartedAt: testNow}}}
 			pattern, target := "GET /api/scripts", "/api/scripts"
@@ -432,6 +471,8 @@ func TestStoreFailures(t *testing.T) {
 				f.runsErr = failure
 			case "script-requests":
 				f.requestsErr = failure
+			case "script-enabled":
+				f.enabledErr = failure
 			case "series":
 				f.requestsErr = failure
 				pattern, target = "GET /api/scripts/{name}/requests/series", "/api/scripts/alpha/requests/series"
@@ -475,4 +516,150 @@ func TestDefaultClock(t *testing.T) {
 			t.Errorf("%s: status=%d, window=[%s,%s]", kind, w.Code, f.since, f.until)
 		}
 	}
+}
+
+// CLM-5: scriptDTO carries Enabled boolean reflecting store state (true by default, false if disabled).
+func TestScriptsEnabled(t *testing.T) {
+	f := &fakeStore{
+		requests: []store.Request{
+			{Script: "a", StartedAt: testNow},
+			{Script: "b", StartedAt: testNow},
+		},
+		disabled: map[string]bool{"b": true},
+	}
+	schedules := map[string]string{"a": "", "b": ""}
+	w := serve(t, "GET /api/scripts", "/api/scripts", NewScriptsHandler(f, schedules, fixedNow))
+	assertJSON(t, w, `[
+		{"name":"a","latest":null,"uptime":0,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0,"enabled":true},
+		{"name":"b","latest":null,"uptime":0,"schedule":"","avgLatency":0,"p95Latency":0,"okRuns":0,"failedRuns":0,"enabled":false}
+	]`)
+}
+
+// CLM-6: NewScriptEnabledHandler decodes body, checks schedules, persists state, handles errors.
+func TestScriptEnabledHandler(t *testing.T) {
+	schedules := map[string]string{"alpha": "@daily"}
+
+	t.Run("success", func(t *testing.T) {
+		f := &fakeStore{}
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/scripts/alpha/enabled", strings.NewReader(`{"enabled":false}`))
+		r.Header.Set("Content-Type", "application/json")
+		w := serveRequest(t, "POST /api/scripts/{name}/enabled", r, NewScriptEnabledHandler(f, schedules))
+		assertJSON(t, w, `{"name":"alpha","enabled":false}`)
+		if !f.disabled["alpha"] {
+			t.Errorf("expected alpha to be disabled in store")
+		}
+		if f.ctx != t.Context() {
+			t.Errorf("request context not forwarded to SetScriptEnabled")
+		}
+		if len(f.setCalls) != 1 || f.setCalls[0] != (setCall{script: "alpha", enabled: false}) {
+			t.Errorf("setCalls = %+v, want [{alpha false}]", f.setCalls)
+		}
+	})
+
+	t.Run("unknown script 404", func(t *testing.T) {
+		f := &fakeStore{}
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/scripts/unknown/enabled", strings.NewReader(`{"enabled":false}`))
+		r.Header.Set("Content-Type", "application/json")
+		w := serveRequest(t, "POST /api/scripts/{name}/enabled", r, NewScriptEnabledHandler(f, schedules))
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", w.Code)
+		}
+		if len(f.disabled) != 0 {
+			t.Errorf("store modified on 404: %v", f.disabled)
+		}
+		if len(f.setCalls) != 0 {
+			t.Errorf("setCalls on 404 = %+v, want none", f.setCalls)
+		}
+	})
+
+	t.Run("bad json body 400", func(t *testing.T) {
+		for _, badBody := range []string{"not json", `{}`, `{"enabled":"not a bool"}`, ``, `{"enabled":true} trailing garbage`, `{"enabled":true}{"second":true}`} {
+			f := &fakeStore{}
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/scripts/alpha/enabled", strings.NewReader(badBody))
+			r.Header.Set("Content-Type", "application/json")
+			w := serveRequest(t, "POST /api/scripts/{name}/enabled", r, NewScriptEnabledHandler(f, schedules))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("body %q: status = %d, want 400", badBody, w.Code)
+			}
+			if len(f.disabled) != 0 {
+				t.Errorf("store modified on 400 for body %q: %v", badBody, f.disabled)
+			}
+			if len(f.setCalls) != 0 {
+				t.Errorf("setCalls on 400 for body %q = %+v, want none", badBody, f.setCalls)
+			}
+		}
+	})
+
+	t.Run("store error 500", func(t *testing.T) {
+		f := &fakeStore{setEnabledErr: errors.New("write failure")}
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/scripts/alpha/enabled", strings.NewReader(`{"enabled":false}`))
+		r.Header.Set("Content-Type", "application/json")
+		w := serveRequest(t, "POST /api/scripts/{name}/enabled", r, NewScriptEnabledHandler(f, schedules))
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+		body := w.Body.String()
+		if strings.Contains(body, `"name"`) || strings.Contains(body, `"enabled"`) {
+			t.Errorf("500 response body contains DTO fields: %q", body)
+		}
+		var dto scriptStateDTO
+		if err := json.Unmarshal(w.Body.Bytes(), &dto); err == nil && (dto.Name != "" || dto.Enabled) {
+			t.Errorf("500 response body decoded to DTO: %+v", dto)
+		}
+		if len(f.setCalls) != 1 || f.setCalls[0] != (setCall{script: "alpha", enabled: false}) {
+			t.Errorf("setCalls on 500 = %+v, want [{alpha false}]", f.setCalls)
+		}
+	})
+
+	t.Run("unsupported media type 415", func(t *testing.T) {
+		for _, ct := range []string{"", "text/plain", "application/x-www-form-urlencoded", "multipart/form-data"} {
+			f := &fakeStore{}
+			// crafted form body that would decode as JSON if not rejected
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/scripts/alpha/enabled", strings.NewReader(`{"enabled":false,"a":"="}`))
+			if ct != "" {
+				r.Header.Set("Content-Type", ct)
+			}
+			w := serveRequest(t, "POST /api/scripts/{name}/enabled", r, NewScriptEnabledHandler(f, schedules))
+			if w.Code != http.StatusUnsupportedMediaType {
+				t.Fatalf("content-type %q: status = %d, want 415", ct, w.Code)
+			}
+			if len(f.disabled) != 0 {
+				t.Errorf("store modified on 415 for content-type %q: %v", ct, f.disabled)
+			}
+			if len(f.setCalls) != 0 {
+				t.Errorf("setCalls on 415 for content-type %q = %+v, want none", ct, f.setCalls)
+			}
+		}
+	})
+
+	t.Run("success with charset in content-type", func(t *testing.T) {
+		f := &fakeStore{}
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/scripts/alpha/enabled", strings.NewReader(`{"enabled":false}`))
+		r.Header.Set("Content-Type", "application/json; charset=utf-8")
+		w := serveRequest(t, "POST /api/scripts/{name}/enabled", r, NewScriptEnabledHandler(f, schedules))
+		assertJSON(t, w, `{"name":"alpha","enabled":false}`)
+		if !f.disabled["alpha"] {
+			t.Errorf("expected alpha to be disabled in store")
+		}
+		if len(f.setCalls) != 1 || f.setCalls[0] != (setCall{script: "alpha", enabled: false}) {
+			t.Errorf("setCalls = %+v, want [{alpha false}]", f.setCalls)
+		}
+	})
+
+	t.Run("cross-site rejected 403", func(t *testing.T) {
+		f := &fakeStore{}
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/scripts/alpha/enabled", strings.NewReader(`{"enabled":false}`))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Sec-Fetch-Site", "cross-site")
+		w := serveRequest(t, "POST /api/scripts/{name}/enabled", r, NewScriptEnabledHandler(f, schedules))
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", w.Code)
+		}
+		if len(f.disabled) != 0 {
+			t.Errorf("store modified on 403: %v", f.disabled)
+		}
+		if len(f.setCalls) != 0 {
+			t.Errorf("setCalls on 403 = %+v, want none", f.setCalls)
+		}
+	})
 }

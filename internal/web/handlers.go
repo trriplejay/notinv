@@ -3,7 +3,10 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"math"
+	"mime"
 	"net/http"
 	"sort"
 	"time"
@@ -16,16 +19,22 @@ type RunQuerier interface {
 	QueryRuns(ctx context.Context, script string, since, until time.Time) ([]store.Run, error)
 }
 
-// ScriptLister supplies latest runs and windowed run and request history.
+// ScriptLister supplies script names, latest runs, enabled states, and windowed run and request history.
 type ScriptLister interface {
 	RunQuerier
 	RequestQuerier
 	LatestRun(ctx context.Context, script string) (*store.Run, error)
+	ScriptEnabled(ctx context.Context, script string) (bool, error)
 }
 
 // RequestQuerier reads a script's requests within inclusive time bounds.
 type RequestQuerier interface {
 	QueryRequests(ctx context.Context, script string, since, until time.Time) ([]store.Request, error)
+}
+
+// ScriptEnabler sets whether a script is permitted to run.
+type ScriptEnabler interface {
+	SetScriptEnabled(ctx context.Context, script string, enabled bool) error
 }
 
 // Pinger checks database reachability.
@@ -48,6 +57,7 @@ type scriptDTO struct {
 	P95Latency float64    `json:"p95Latency"`
 	OKRuns     int        `json:"okRuns"`
 	FailedRuns int        `json:"failedRuns"`
+	Enabled    bool       `json:"enabled"`
 }
 
 type runDTO struct {
@@ -104,7 +114,12 @@ func NewScriptsHandler(db ScriptLister, schedules map[string]string, now func() 
 				http.Error(w, "cannot read requests", http.StatusInternalServerError)
 				return
 			}
-			item := scriptDTO{Name: name, Schedule: schedules[name]}
+			enabled, err := db.ScriptEnabled(r.Context(), name)
+			if err != nil {
+				http.Error(w, "cannot read script state", http.StatusInternalServerError)
+				return
+			}
+			item := scriptDTO{Name: name, Schedule: schedules[name], Enabled: enabled}
 			if len(requests) > 0 {
 				latencies := make([]int64, 0, len(requests))
 				for _, request := range requests {
@@ -132,6 +147,57 @@ func NewScriptsHandler(db ScriptLister, schedules map[string]string, now func() 
 			out = append(out, item)
 		}
 		writeJSON(w, out)
+	})
+}
+
+type scriptStateDTO struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+}
+
+type setScriptEnabledRequest struct {
+	Enabled *bool `json:"enabled"`
+}
+
+// NewScriptEnabledHandler serves POST /api/scripts/{name}/enabled.
+func NewScriptEnabledHandler(db ScriptEnabler, schedules map[string]string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if _, ok := schedules[name]; !ok {
+			http.Error(w, "script not found", http.StatusNotFound)
+			return
+		}
+		ct := r.Header.Get("Content-Type")
+		mediaType, _, _ := mime.ParseMediaType(ct)
+		if mediaType != "application/json" {
+			http.Error(w, "unsupported media type: Content-Type must be application/json", http.StatusUnsupportedMediaType)
+			return
+		}
+		if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+			http.Error(w, "cross-site request forbidden", http.StatusForbidden)
+			return
+		}
+		var req setScriptEnabledRequest
+		r.Body = http.MaxBytesReader(w, r.Body, 1024)
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&req); err != nil || req.Enabled == nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if dec.More() {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		var trailing any
+		if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if err := db.SetScriptEnabled(r.Context(), name, *req.Enabled); err != nil {
+			http.Error(w, "cannot update script state", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, scriptStateDTO{Name: name, Enabled: *req.Enabled})
 	})
 }
 

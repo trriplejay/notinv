@@ -44,6 +44,12 @@ var migrations = []struct {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_key ON runs(key)`,
 		`CREATE INDEX IF NOT EXISTS idx_runs_script_started ON runs(script, started_at)`,
 	}},
+	{2, []string{
+		`CREATE TABLE IF NOT EXISTS script_state (
+			script TEXT PRIMARY KEY,
+			enabled BOOLEAN NOT NULL
+		)`,
+	}},
 }
 
 // migrate applies outstanding migrations in one transaction. It first takes a

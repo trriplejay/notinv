@@ -244,3 +244,34 @@ func (s *Store) InsertRun(ctx context.Context, run Run) error {
 	})
 	return s.wrap("insert run", err)
 }
+
+// ScriptEnabled reports whether the script may run. A script with no stored
+// state is enabled.
+func (s *Store) ScriptEnabled(ctx context.Context, script string) (bool, error) {
+	enabled := true
+	err := s.withRetry(ctx, func(ctx context.Context) error {
+		var v bool
+		err := s.db.QueryRowContext(ctx, `SELECT enabled FROM script_state WHERE script = $1`, script).Scan(&v)
+		if errors.Is(err, sql.ErrNoRows) {
+			enabled = true
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		enabled = v
+		return nil
+	})
+	return enabled, s.wrap("read script state", err)
+}
+
+// SetScriptEnabled stores whether the script may run. It touches only the
+// script_state table; recorded runs and requests are unchanged.
+func (s *Store) SetScriptEnabled(ctx context.Context, script string, enabled bool) error {
+	err := s.withRetry(ctx, func(ctx context.Context) error {
+		_, err := s.db.ExecContext(ctx, `INSERT INTO script_state (script, enabled) VALUES ($1, $2)
+			ON CONFLICT (script) DO UPDATE SET enabled = EXCLUDED.enabled`, script, enabled)
+		return err
+	})
+	return s.wrap("set script state", err)
+}

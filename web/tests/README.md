@@ -38,6 +38,16 @@ They cover linked slim cards, detail fields, chart ranges, direct navigation,
 missing names, and failure messages. The older `dashboard.test.cjs` still expects
 full-detail landing cards and is not the gate for the slim-card layout.
 
+The component-level enable/disable toggle tests are in `toggle.test.cjs`
+(`npm --prefix web/tests run test:toggle` or `node --test toggle.test.cjs`).
+They test the real static pages (`web/static/index.html` and `web/static/script.html`)
+with Playwright without requiring the Go server or Postgres database. Static assets
+are served from disk and API routes (`/api/scripts`, `/api/scripts/*/enabled`,
+and series endpoints) are intercepted via `page.route`. Tests cover landing card
+and script page button state flipping (CLM-1, CLM-2), 500 and network failure
+handling (CLM-3), debouncing/disabled state while requests are pending (CLM-4),
+not-found script handling (CLM-5), and periodic 30-second refresh relabeling (CLM-6).
+
 Tests cover live DTO cards (including null latest and untrusted text), time-axis
 URL grouping, status/error colors, all range windows through the RFC3339 parser,
 auto-refresh with a virtual browser clock, dynamic dark mode, no external requests,
