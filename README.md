@@ -181,6 +181,7 @@ default), the service includes built-in scripts:
 
 - `nintendo` (`scripts/nintendo`): monitors the Electric Ocarina of Time storefront offer every 30 seconds (`@every 30s`) and notifies on transitions into stock.
 - `lunch` (`scripts/lunch`): sends the MealViewer school lunch menu weekdays (Monday–Friday) at 6:00am Pacific (`America/Los_Angeles`, following daylight saving; schedule `CRON_TZ=America/Los_Angeles 0 6 * * 1-5`). It does **not** send a message when the service starts up (only at the 6:00am run). It lists that day's lunch items one per line. If no menu is found, it sends a message saying no menu was found; on retrieval failures, it sends a message indicating the menu could not be retrieved and records that run as failed. It reads the `LUNCH_SCHOOL` environment variable (the school name in the MealViewer URL, default `Bryant`).
+- `nerdygurdy` (`scripts/nerdygurdy`): monitors the NG Linotte kit restock once a minute during the Sunday 19:00–22:59 Amsterdam window (`CRON_TZ=Europe/Amsterdam * 19-22 * * 0`) and notifies via DM only on transitions from out of stock into stock. If the service starts outside the Sunday 19:00–22:59 Europe/Amsterdam window, the startup run makes no request, and the first in-window fire sets a silent baseline with no notification. If the shop's posted restock sentence (`New stock is added each Sunday around 20:30 Central European Time.`) is missing or changed, that is logged at Warn only: the run still records OK, nothing is notified, and nothing shows as a dashboard note. It reads no environment variables.
 
 ### Register in the entrypoint
 
@@ -189,7 +190,7 @@ current `NOTINV_ENV`:
 
 ```go
 func defaultScripts(env string) []runner.Script {
-	scripts := []runner.Script{nintendo.New(), lunch.New()}
+	scripts := []runner.Script{nintendo.New(), lunch.New(), nerdygurdy.New()}
 	if env != "prod" {
 		scripts = append([]runner.Script{example.New()}, scripts...)
 	}
@@ -284,6 +285,7 @@ cmd/notinv/          entrypoint and explicit script registration
 scripts/example/    copyable script implementation and tests
 scripts/nintendo/   built-in stock monitoring script
 scripts/lunch/      built-in weekday school lunch menu script
+scripts/nerdygurdy/ built-in NG Linotte kit restock monitoring script
 internal/config/    config loading and validation
 internal/runner/    Script interface, shared Context, scheduling and run recording
 internal/store/     database persistence and migrations
