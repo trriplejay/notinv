@@ -406,3 +406,71 @@ func TestNewMuxScriptEnabledRoute(t *testing.T) {
 		}
 	}
 }
+
+// CLM-1: after merging origin/main, every script registered in defaultScripts
+// (including nerdygurdy added in origin/main) appears in GET /api/scripts with
+// an enabled boolean, and POST /api/scripts/{name}/enabled accepts it.
+func TestDashboardDefaultScriptsRegisteredWithEnabled(t *testing.T) {
+	st, err := store.Open(t.Context(), storetest.DatabaseURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	for _, env := range []string{"prod", "dev"} {
+		t.Run(env, func(t *testing.T) {
+			scripts := defaultScripts(env)
+			schedules := make(map[string]string, len(scripts))
+			for _, s := range scripts {
+				schedules[s.Name()] = s.Schedule()
+			}
+			mux := newMux(st, schedules)
+
+			// 1. GET /api/scripts includes all default scripts with enabled boolean
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodGet, "/api/scripts", nil)
+			mux.ServeHTTP(w, r)
+			if w.Code != http.StatusOK {
+				t.Fatalf("GET /api/scripts status = %d, body = %s", w.Code, w.Body.String())
+			}
+			var list []struct {
+				Name    string `json:"name"`
+				Enabled bool   `json:"enabled"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+				t.Fatal(err)
+			}
+			enabledMap := make(map[string]bool)
+			for _, item := range list {
+				enabledMap[item.Name] = item.Enabled
+			}
+			for _, s := range scripts {
+				en, ok := enabledMap[s.Name()]
+				if !ok {
+					t.Errorf("script %q missing from GET /api/scripts", s.Name())
+				}
+				if !en {
+					t.Errorf("script %q enabled = %v, want true", s.Name(), en)
+				}
+
+				// 2. POST /api/scripts/{name}/enabled accepts it
+				pw := httptest.NewRecorder()
+				pr := httptest.NewRequest(http.MethodPost, "/api/scripts/"+s.Name()+"/enabled", strings.NewReader(`{"enabled":false}`))
+				pr.Header.Set("Content-Type", "application/json")
+				mux.ServeHTTP(pw, pr)
+				if pw.Code != http.StatusOK {
+					t.Errorf("POST /api/scripts/%s/enabled status = %d, want 200", s.Name(), pw.Code)
+				}
+
+				// Reset to enabled
+				pw2 := httptest.NewRecorder()
+				pr2 := httptest.NewRequest(http.MethodPost, "/api/scripts/"+s.Name()+"/enabled", strings.NewReader(`{"enabled":true}`))
+				pr2.Header.Set("Content-Type", "application/json")
+				mux.ServeHTTP(pw2, pr2)
+				if pw2.Code != http.StatusOK {
+					t.Errorf("POST /api/scripts/%s/enabled (re-enable) status = %d, want 200", s.Name(), pw2.Code)
+				}
+			}
+		})
+	}
+}
