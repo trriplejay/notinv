@@ -36,32 +36,118 @@ func TestDefaultScripts(t *testing.T) {
 		"lunch":      "CRON_TZ=America/Los_Angeles 0 6 * * 1-5",
 		"nerdygurdy": "CRON_TZ=Europe/Amsterdam * 19-22 * * 0",
 	}
-	for _, tt := range []struct {
-		env         string
-		wantExample bool
+	for _, env := range []string{"dev", "prod"} {
+		t.Run(env, func(t *testing.T) {
+			checkRegisteredScripts(t, env, defaultScripts(env), schedules)
+		})
+	}
+}
+
+type scriptReporter interface {
+	Helper()
+	Errorf(format string, args ...any)
+}
+
+func checkRegisteredScripts(t scriptReporter, env string, scripts []runner.Script, schedules map[string]string) {
+	t.Helper()
+	wantExample := env == "dev"
+	seen := map[string]bool{}
+	for _, script := range scripts {
+		seen[script.Name()] = true
+		want, ok := schedules[script.Name()]
+		if !ok && (script.Name() != "example" || !wantExample) {
+			t.Errorf("unexpected script %q registered in %s", script.Name(), env)
+		}
+		if ok && script.Schedule() != want {
+			t.Errorf("%s schedule = %q, want %q", script.Name(), script.Schedule(), want)
+		}
+	}
+	for name := range schedules {
+		if !seen[name] {
+			t.Errorf("%s is absent from the %s scripts", name, env)
+		}
+	}
+	if seen["example"] != wantExample {
+		t.Errorf("example registered = %v, want %v", seen["example"], wantExample)
+	}
+}
+
+type fakeReporter struct {
+	errors int
+}
+
+func (f *fakeReporter) Helper() {}
+
+func (f *fakeReporter) Errorf(format string, args ...any) {
+	f.errors++
+}
+
+type fakeScript struct {
+	name     string
+	schedule string
+}
+
+func (s fakeScript) Name() string                                      { return s.name }
+func (s fakeScript) Schedule() string                                  { return s.schedule }
+func (s fakeScript) Run(ctx context.Context, rc *runner.Context) error { return nil }
+
+func TestCheckRegisteredScriptsRejectsUnexpected(t *testing.T) {
+	schedules := map[string]string{
+		"lunch":      "CRON_TZ=America/Los_Angeles 0 6 * * 1-5",
+		"nerdygurdy": "CRON_TZ=Europe/Amsterdam * 19-22 * * 0",
+	}
+	validLunch := fakeScript{name: "lunch", schedule: schedules["lunch"]}
+	validNerdy := fakeScript{name: "nerdygurdy", schedule: schedules["nerdygurdy"]}
+	validExample := fakeScript{name: "example", schedule: "@every 1h"}
+	nintendoScript := fakeScript{name: "nintendo", schedule: "@every 1h"}
+
+	tests := []struct {
+		name      string
+		env       string
+		scripts   []runner.Script
+		wantError bool
 	}{
-		{"dev", true},
-		{"prod", false},
-	} {
-		t.Run(tt.env, func(t *testing.T) {
-			seen := map[string]bool{}
-			for _, script := range defaultScripts(tt.env) {
-				seen[script.Name()] = true
-				want, ok := schedules[script.Name()]
-				if !ok && (script.Name() != "example" || !tt.wantExample) {
-					t.Errorf("unexpected script %q registered in %s", script.Name(), tt.env)
-				}
-				if ok && script.Schedule() != want {
-					t.Errorf("%s schedule = %q, want %q", script.Name(), script.Schedule(), want)
-				}
+		{
+			name:      "valid dev set",
+			env:       "dev",
+			scripts:   []runner.Script{validLunch, validNerdy, validExample},
+			wantError: false,
+		},
+		{
+			name:      "valid prod set",
+			env:       "prod",
+			scripts:   []runner.Script{validLunch, validNerdy},
+			wantError: false,
+		},
+		{
+			name:      "nintendo in dev",
+			env:       "dev",
+			scripts:   []runner.Script{validLunch, validNerdy, validExample, nintendoScript},
+			wantError: true,
+		},
+		{
+			name:      "nintendo in prod",
+			env:       "prod",
+			scripts:   []runner.Script{validLunch, validNerdy, nintendoScript},
+			wantError: true,
+		},
+		{
+			name:      "example in prod",
+			env:       "prod",
+			scripts:   []runner.Script{validLunch, validNerdy, validExample},
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeReporter{}
+			checkRegisteredScripts(fake, tt.env, tt.scripts, schedules)
+			if tt.wantError && fake.errors == 0 {
+				t.Errorf("expected failure for %s in %s, got none", tt.name, tt.env)
 			}
-			for name := range schedules {
-				if !seen[name] {
-					t.Errorf("%s is absent from the %s scripts", name, tt.env)
-				}
-			}
-			if seen["example"] != tt.wantExample {
-				t.Errorf("example registered = %v, want %v", seen["example"], tt.wantExample)
+			if !tt.wantError && fake.errors > 0 {
+				t.Errorf("expected no failure for %s in %s, got %d errors", tt.name, tt.env, fake.errors)
 			}
 		})
 	}
