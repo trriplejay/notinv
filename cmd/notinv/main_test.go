@@ -30,7 +30,7 @@ import (
 
 // TestDefaultScripts verifies that the service's runnable set includes the
 // lunch and nerdygurdy scripts with their schedules in every environment, and the
-// example script only in dev.
+// example script only in dev, and nothing else: any other registered name fails.
 func TestDefaultScripts(t *testing.T) {
 	schedules := map[string]string{
 		"lunch":      "CRON_TZ=America/Los_Angeles 0 6 * * 1-5",
@@ -47,7 +47,11 @@ func TestDefaultScripts(t *testing.T) {
 			seen := map[string]bool{}
 			for _, script := range defaultScripts(tt.env) {
 				seen[script.Name()] = true
-				if want, ok := schedules[script.Name()]; ok && script.Schedule() != want {
+				want, ok := schedules[script.Name()]
+				if !ok && !(script.Name() == "example" && tt.wantExample) {
+					t.Errorf("unexpected script %q registered in %s", script.Name(), tt.env)
+				}
+				if ok && script.Schedule() != want {
 					t.Errorf("%s schedule = %q, want %q", script.Name(), script.Schedule(), want)
 				}
 			}
