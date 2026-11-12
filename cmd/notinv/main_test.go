@@ -78,7 +78,7 @@ type fakeReporter struct {
 
 func (f *fakeReporter) Helper() {}
 
-func (f *fakeReporter) Errorf(format string, args ...any) {
+func (f *fakeReporter) Errorf(_ string, _ ...any) {
 	f.errors++
 }
 
@@ -87,9 +87,9 @@ type fakeScript struct {
 	schedule string
 }
 
-func (s fakeScript) Name() string                                      { return s.name }
-func (s fakeScript) Schedule() string                                  { return s.schedule }
-func (s fakeScript) Run(ctx context.Context, rc *runner.Context) error { return nil }
+func (s fakeScript) Name() string                                  { return s.name }
+func (s fakeScript) Schedule() string                              { return s.schedule }
+func (s fakeScript) Run(_ context.Context, _ *runner.Context) error { return nil }
 
 func TestCheckRegisteredScriptsRejectsUnexpected(t *testing.T) {
 	schedules := map[string]string{
