@@ -48,7 +48,7 @@ func TestDefaultScripts(t *testing.T) {
 			for _, script := range defaultScripts(tt.env) {
 				seen[script.Name()] = true
 				want, ok := schedules[script.Name()]
-				if !ok && !(script.Name() == "example" && tt.wantExample) {
+				if !ok && (script.Name() != "example" || !tt.wantExample) {
 					t.Errorf("unexpected script %q registered in %s", script.Name(), tt.env)
 				}
 				if ok && script.Schedule() != want {
