@@ -26,7 +26,6 @@ import (
 	"github.com/trriplejay/notinv/scripts/example"
 	"github.com/trriplejay/notinv/scripts/lunch"
 	"github.com/trriplejay/notinv/scripts/nerdygurdy"
-	"github.com/trriplejay/notinv/scripts/nintendo"
 	webassets "github.com/trriplejay/notinv/web"
 )
 
@@ -154,7 +153,7 @@ func run() error {
 // defaultScripts returns fresh instances of the scripts scheduled by the service
 // in env. The example script is registered only outside prod.
 func defaultScripts(env string) []runner.Script {
-	scripts := []runner.Script{nintendo.New(), lunch.New(), nerdygurdy.New()}
+	scripts := []runner.Script{lunch.New(), nerdygurdy.New()}
 	if env != "prod" {
 		scripts = append([]runner.Script{example.New()}, scripts...)
 	}
