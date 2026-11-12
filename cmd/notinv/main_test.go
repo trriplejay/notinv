@@ -87,8 +87,8 @@ type fakeScript struct {
 	schedule string
 }
 
-func (s fakeScript) Name() string                                  { return s.name }
-func (s fakeScript) Schedule() string                              { return s.schedule }
+func (s fakeScript) Name() string                                   { return s.name }
+func (s fakeScript) Schedule() string                               { return s.schedule }
 func (s fakeScript) Run(_ context.Context, _ *runner.Context) error { return nil }
 
 func TestCheckRegisteredScriptsRejectsUnexpected(t *testing.T) {
